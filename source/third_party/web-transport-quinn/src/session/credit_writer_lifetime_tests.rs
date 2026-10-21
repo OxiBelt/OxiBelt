@@ -219,3 +219,172 @@ async fn credit_writer_owner_follows_the_final_session_clone() -> Result<()> {
     server.conn.close(0u32.into(), b"test complete");
     Ok(())
 }
+
+#[tokio::test]
+async fn reliable_prefix_keeps_reset_stream_association_and_charges_final_size_once() -> Result<()>
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (server, client) = pair().await?;
+    server.grant_receive_credit(1, 1, 64)?;
+    client.grant_receive_credit(1, 1, 64)?;
+    let mut send = timeout(Duration::from_secs(5), client.open_uni()).await??;
+    AsyncWriteExt::write_all(&mut send, b"payload").await?;
+    send.reset(77)?;
+    let mut recv = timeout(Duration::from_secs(5), server.accept_uni()).await??;
+    let mut body = Vec::new();
+    let error = timeout(
+        Duration::from_secs(5),
+        AsyncReadExt::read_to_end(&mut recv, &mut body),
+    )
+    .await?
+    .unwrap_err();
+    assert!(
+        matches!(error.get_ref().and_then(|e| e.downcast_ref::<quinn::ReadError>()), Some(quinn::ReadError::Reset(code)) if code.into_inner() == web_transport_proto::error_to_http3(77))
+    );
+    let final_size = recv.reset_info().expect("reset final size").final_size;
+    assert_eq!(final_size, client.header_uni.len() as u64 + 7);
+    let flow = server.flow.as_ref().unwrap();
+    assert_eq!(flow.incoming.lock().unwrap().used_data, 7);
+    let mut initialized = [0u8; 1];
+    let _ = AsyncReadExt::read(&mut recv, &mut initialized).await;
+    assert_eq!(
+        flow.incoming.lock().unwrap().used_data,
+        7,
+        "reset charged exactly once"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reset_accounting_preserves_nonminimal_association_varint_widths() -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let (server, client) = pair().await?;
+    server.grant_receive_credit(1, 1, 64)?;
+    timeout(Duration::from_secs(5), async {
+        while server
+            .flow
+            .as_ref()
+            .unwrap()
+            .incoming
+            .lock()
+            .unwrap()
+            .max_uni
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let mut send = client.conn.open_uni().await?;
+    let typ = crate::proto::StreamUni::WEBTRANSPORT.0.into_inner() as u32 | (2 << 30);
+    let id = client.session_id.unwrap().into_inner() as u16 | (1 << 14);
+    let mut header = Vec::new();
+    header.extend_from_slice(&typ.to_be_bytes());
+    header.extend_from_slice(&id.to_be_bytes());
+    send.write_all(&header).await?;
+    send.write_all(b"xyz").await?;
+    send.reset_at(
+        quinn::VarInt::try_from(web_transport_proto::error_to_http3(88))?,
+        header.len() as u64,
+    )?;
+    let mut recv = timeout(Duration::from_secs(5), server.accept_uni()).await??;
+    let mut initialized = [0u8; 8];
+    let _ = timeout(
+        Duration::from_secs(5),
+        AsyncReadExt::read(&mut recv, &mut initialized),
+    )
+    .await?;
+    if server
+        .flow
+        .as_ref()
+        .unwrap()
+        .incoming
+        .lock()
+        .unwrap()
+        .used_data
+        != 3
+    {
+        let _ = timeout(
+            Duration::from_secs(5),
+            AsyncReadExt::read(&mut recv, &mut initialized),
+        )
+        .await?;
+    }
+    assert_eq!(recv.reset_info().unwrap().final_size, 9);
+    assert_eq!(
+        server
+            .flow
+            .as_ref()
+            .unwrap()
+            .incoming
+            .lock()
+            .unwrap()
+            .used_data,
+        3,
+        "header width excluded from body charge"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn initialized_tokio_writes_wait_for_session_credit_and_resume_after_consumption(
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (server, client) = pair().await?;
+    server.grant_receive_credit(1, 1, 4)?;
+    let mut send = timeout(Duration::from_secs(5), client.open_uni()).await??;
+    assert_eq!(AsyncWriteExt::write(&mut send, b"abcde").await?, 4);
+    assert!(timeout(
+        Duration::from_millis(20),
+        AsyncWriteExt::write(&mut send, b"e")
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        client
+            .flow
+            .as_ref()
+            .unwrap()
+            .outgoing
+            .lock()
+            .unwrap()
+            .used_data,
+        4
+    );
+    let mut recv = timeout(Duration::from_secs(5), server.accept_uni()).await??;
+    let mut initialized = [0u8; 4];
+    timeout(
+        Duration::from_secs(5),
+        AsyncReadExt::read_exact(&mut recv, &mut initialized),
+    )
+    .await??;
+    assert_eq!(&initialized, b"abcd");
+    assert_eq!(
+        timeout(
+            Duration::from_secs(5),
+            AsyncWriteExt::write(&mut send, b"e")
+        )
+        .await??,
+        1
+    );
+    AsyncWriteExt::shutdown(&mut send).await?;
+    let mut rest = Vec::new();
+    timeout(
+        Duration::from_secs(5),
+        AsyncReadExt::read_to_end(&mut recv, &mut rest),
+    )
+    .await??;
+    assert_eq!(rest, b"e");
+    assert_eq!(
+        server
+            .flow
+            .as_ref()
+            .unwrap()
+            .incoming
+            .lock()
+            .unwrap()
+            .used_data,
+        5
+    );
+    Ok(())
+}

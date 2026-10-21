@@ -501,6 +501,17 @@ impl Connection {
             .max_size()
     }
 
+    /// Complete incoming DATAGRAM frame limit advertised by this connection.
+    ///
+    /// The value belongs to the established connection, independently of endpoint reloads.
+    pub fn max_receive_datagram_frame_size(&self) -> Option<VarInt> {
+        self.0
+            .state
+            .lock("max_receive_datagram_frame_size")
+            .inner
+            .max_receive_datagram_frame_size()
+    }
+
     /// Bytes available in the outgoing datagram buffer
     ///
     /// When greater than zero, calling [`send_datagram()`](Self::send_datagram) with a datagram of

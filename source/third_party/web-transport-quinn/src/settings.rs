@@ -62,7 +62,11 @@ impl Settings {
 
         // Run both tasks concurrently until one errors or they both complete.
         let (send, (recv, peer_credit)) = try_join!(send, recv)?;
-        Ok(Self { send, recv, peer_credit })
+        Ok(Self {
+            send,
+            recv,
+            peer_credit,
+        })
     }
 
     async fn accept(
@@ -76,7 +80,9 @@ impl Settings {
 
         let supported = match draft {
             web_transport_proto::WebTransportDraft::Draft02 => settings.supports_webtransport() > 0,
-            web_transport_proto::WebTransportDraft::Draft16 => settings.supports_webtransport_draft16(),
+            web_transport_proto::WebTransportDraft::Draft16 => {
+                settings.supports_webtransport_draft16()
+            }
         };
         if !supported {
             return Err(SettingsError::WebTransportUnsupported);
@@ -84,7 +90,8 @@ impl Settings {
 
         let credit = settings.draft16_initial_credit();
         if draft == web_transport_proto::WebTransportDraft::Draft16
-            && (credit.0 > web_transport_proto::MAX_STREAMS || credit.1 > web_transport_proto::MAX_STREAMS)
+            && (credit.0 > web_transport_proto::MAX_STREAMS
+                || credit.1 > web_transport_proto::MAX_STREAMS)
         {
             return Err(SettingsError::InvalidInitialCredit);
         }

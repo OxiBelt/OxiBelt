@@ -1,3 +1,4 @@
+use crate::error::CloseReason;
 use std::{
     fmt,
     future::Future,
@@ -124,7 +125,7 @@ pub struct Session {
     // Session error, set once by either local close() or the background task
     // when a remote CloseWebTransportSession capsule is received.
     // Uses OnceLock for set-once, first-writer-wins semantics with lock-free reads.
-    error: Arc<OnceLock<SessionError>>,
+    error: Arc<CloseReason>,
     draining: Arc<watch::Sender<bool>>,
 
     // The request sent by the client, or None for a raw QUIC session.
@@ -215,7 +216,7 @@ impl Session {
         let mut header_datagram = Vec::new();
         datagram_id.encode(&mut header_datagram);
 
-        let error: Arc<OnceLock<SessionError>> = Arc::new(OnceLock::new());
+        let error = Arc::new(CloseReason::http3());
         let draining = Arc::new(watch::channel(false).0);
         let flow = if draft16 {
             Some(
@@ -281,7 +282,7 @@ impl Session {
     async fn run_recv(
         conn: quinn::Connection,
         recv: quinn::RecvStream,
-        error: Arc<OnceLock<SessionError>>,
+        error: Arc<CloseReason>,
         flow: Option<Arc<SessionFlow>>,
         draining: Arc<watch::Sender<bool>>,
     ) {
@@ -441,7 +442,7 @@ impl Session {
                 .accept_uni()
                 .await
                 .map_err(|e| self.map_error(e))?;
-            let mut recv = RecvStream::new(recv, self.error.clone());
+            let mut recv = RecvStream::new(recv, self.error.clone(), self.is_raw());
             if let Some(flow) = &self.flow {
                 if recv.set_flow(flow.clone(), false).is_err() {
                     flow.fail();
@@ -470,11 +471,11 @@ impl Session {
             Ok((send, recv))
         } else {
             let (send, recv) = self.conn.accept_bi().await.map_err(|e| self.map_error(e))?;
-            let mut send = SendStream::new(send, self.error.clone());
+            let mut send = SendStream::new(send, self.error.clone(), self.is_raw());
             if self.draft16 {
                 send.set_reliable_prefix(0);
             }
-            let mut recv = RecvStream::new(recv, self.error.clone());
+            let mut recv = RecvStream::new(recv, self.error.clone(), self.is_raw());
             if let Some(flow) = &self.flow {
                 if recv.set_flow(flow.clone(), true).is_err() {
                     flow.fail();
@@ -491,6 +492,7 @@ impl Session {
             self.conn.clone(),
             self.header_uni.clone(),
             self.error.clone(),
+            self.is_raw(),
             self.draft16,
             self.flow.clone(),
         )
@@ -503,6 +505,7 @@ impl Session {
             self.conn.clone(),
             self.header_bi.clone(),
             self.error.clone(),
+            self.is_raw(),
             self.draft16,
             self.flow.clone(),
         )
@@ -568,13 +571,12 @@ impl Session {
     }
 
     /// Computes the maximum size of datagrams that may be passed to
-    /// [`send_datagram`](Self::send_datagram).
+    /// [`send_datagram`](Self::send_datagram), or 0 when the peer does not accept datagrams.
     pub fn max_datagram_size(&self) -> usize {
-        let mtu = self
-            .conn
+        self.conn
             .max_datagram_size()
-            .expect("datagram support is required");
-        mtu.saturating_sub(self.header_datagram.len())
+            .unwrap_or(0)
+            .saturating_sub(self.header_datagram.len())
     }
 
     /// The number of bytes of available space in the outgoing datagram buffer.
@@ -599,7 +601,10 @@ impl Session {
     pub fn close(&self, code: u32, reason: &[u8]) {
         // Record the local close error. First writer wins — if the background
         // task already set a remote close error, or close() was already called,
-        // this is a no-op.
+        // this is a no-op. A raw peer close that already arrived is latched first.
+        if let Some(err) = self.conn.close_reason() {
+            self.map_error(err);
+        }
         let err = SessionError::ConnectionError(quinn::ConnectionError::LocallyClosed);
         let recorded = self.error.set(err).is_ok();
         if let Some(flow) = &self.flow {
@@ -690,7 +695,7 @@ impl Session {
     async fn run_credit_writer(
         conn: quinn::Connection,
         send: Arc<tokio::sync::Mutex<quinn::SendStream>>,
-        error: Arc<OnceLock<SessionError>>,
+        error: Arc<CloseReason>,
         flow: Arc<SessionFlow>,
     ) {
         loop {
@@ -749,33 +754,25 @@ impl Session {
         self.conn.close_reason().map(|e| self.map_error(e))
     }
 
+    /// Whether this is a raw QUIC session, with no HTTP/3 layer.
+    fn is_raw(&self) -> bool {
+        self.session_id.is_none()
+    }
+
     /// Replace connection-level errors with the stored session error if available.
     fn map_error(&self, e: impl Into<SessionError>) -> SessionError {
         map_error_with(&self.error, e)
     }
 
     // The owned-argument form, for futures that outlive the borrow that created them.
-    fn map_error_owned(error: &OnceLock<SessionError>, e: impl Into<SessionError>) -> SessionError {
+    fn map_error_owned(error: &CloseReason, e: impl Into<SessionError>) -> SessionError {
         map_error_with(error, e)
     }
 }
 
 /// Replace connection-level errors with the stored session error if available.
-fn map_error_with(stored: &OnceLock<SessionError>, e: impl Into<SessionError>) -> SessionError {
-    {
-        let e = e.into();
-        if let Some(err) = stored.get() {
-            if matches!(
-                &e,
-                SessionError::ConnectionError(_)
-                    | SessionError::WebTransportError(WebTransportError::Closed(..))
-                    | SessionError::SendDatagramError(quinn::SendDatagramError::ConnectionLost(_))
-            ) {
-                return err.clone();
-            }
-        }
-        e
-    }
+fn map_error_with(stored: &CloseReason, e: impl Into<SessionError>) -> SessionError {
+    stored.map(e.into())
 }
 
 impl Session {
@@ -798,6 +795,7 @@ impl Session {
     /// (from `into_0rtt`, say) is fine, it just has no ALPN to report until it is done.
     pub fn raw(conn: quinn::Connection) -> Self {
         Self {
+            error: Arc::new(CloseReason::raw(conn.clone())),
             conn,
             session_id: None,
             datagram_id: None,
@@ -819,7 +817,6 @@ impl Session {
             parked_accept_bi: Default::default(),
             settings: None,
             connect_send: None,
-            error: Arc::new(OnceLock::new()),
             draining: Arc::new(watch::channel(false).0),
             request: None,
             response: None,
@@ -876,6 +873,7 @@ impl Session {
         SessionStats {
             stats: self.conn.stats(),
             rtt: self.conn.rtt(),
+            pacing_rate: self.conn.congestion_state().metrics().pacing_rate,
         }
     }
 }
@@ -977,7 +975,7 @@ pub struct SessionAccept {
     session_id: VarInt,
 
     // Shared session error for propagation to accepted streams.
-    error: Arc<OnceLock<SessionError>>,
+    error: Arc<CloseReason>,
 
     // We also need to keep a reference to the qpack streams if the endpoint (incorrectly) creates them.
     // Again, this is just so they don't get closed until we drop the session.
@@ -1010,7 +1008,7 @@ impl SessionAccept {
     pub(crate) fn new(
         conn: quinn::Connection,
         session_id: VarInt,
-        error: Arc<OnceLock<SessionError>>,
+        error: Arc<CloseReason>,
     ) -> Self {
         // Create a stream that just outputs new streams, so it's easy to call from poll.
         let accept_uni = Box::pin(futures::stream::unfold(conn.clone(), |conn| async {
@@ -1089,8 +1087,7 @@ impl SessionAccept {
             let (typ, recv, header_size) = match self.pending_uni.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(res))) => res,
                 Poll::Ready(Some(Err(err))) => {
-                    // Ignore the error, the stream was probably reset early.
-                    tracing::warn!(?err, "failed to decode unidirectional stream");
+                    log_header_error(err, "unidirectional");
                     continue;
                 }
                 Poll::Ready(None) | Poll::Pending => return Poll::Pending,
@@ -1099,7 +1096,7 @@ impl SessionAccept {
             // Decide if we keep looping based on the type.
             match typ {
                 StreamUni::WEBTRANSPORT => {
-                    let recv = RecvStream::new(recv, self.error.clone())
+                    let recv = RecvStream::new(recv, self.error.clone(), false)
                         .with_association_header_size(header_size);
                     return Poll::Ready(Ok(recv));
                 }
@@ -1123,17 +1120,13 @@ impl SessionAccept {
         expected_session: VarInt,
     ) -> Result<(StreamUni, quinn::RecvStream, u64), SessionError> {
         // Read the VarInt at the start of the stream.
-        let (typ, type_width) = VarInt::read_with_width(&mut recv)
-            .await
-            .map_err(|_| WebTransportError::UnknownSession)?;
+        let (typ, type_width) = read_varint_with_width(&mut recv).await?;
         let typ = StreamUni(typ);
         let mut header_size = type_width as u64;
 
         if typ == StreamUni::WEBTRANSPORT {
             // Read the session_id and validate it
-            let (session_id, id_width) = VarInt::read_with_width(&mut recv)
-                .await
-                .map_err(|_| WebTransportError::UnknownSession)?;
+            let (session_id, id_width) = read_varint_with_width(&mut recv).await?;
             if session_id != expected_session {
                 return Err(WebTransportError::UnknownSession.into());
             }
@@ -1179,8 +1172,7 @@ impl SessionAccept {
             let res = match self.pending_bi.poll_next_unpin(cx) {
                 Poll::Ready(Some(Ok(res))) => res,
                 Poll::Ready(Some(Err(err))) => {
-                    // Ignore the error, the stream was probably reset early.
-                    tracing::warn!(?err, "failed to decode bidirectional stream");
+                    log_header_error(err, "bidirectional");
                     continue;
                 }
                 Poll::Ready(None) | Poll::Pending => return Poll::Pending,
@@ -1188,8 +1180,8 @@ impl SessionAccept {
 
             if let Some((send, recv, header_size)) = res {
                 // Wrap the streams in our own types for correct error codes.
-                let send = SendStream::new(send, self.error.clone());
-                let recv = RecvStream::new(recv, self.error.clone())
+                let send = SendStream::new(send, self.error.clone(), false);
+                let recv = RecvStream::new(recv, self.error.clone(), false)
                     .with_association_header_size(header_size);
                 return Poll::Ready(Ok((send, recv)));
             }
@@ -1204,18 +1196,14 @@ impl SessionAccept {
         mut recv: quinn::RecvStream,
         expected_session: VarInt,
     ) -> Result<Option<(quinn::SendStream, quinn::RecvStream, u64)>, SessionError> {
-        let (typ, type_width) = VarInt::read_with_width(&mut recv)
-            .await
-            .map_err(|_| WebTransportError::UnknownSession)?;
+        let (typ, type_width) = read_varint_with_width(&mut recv).await?;
         if Frame(typ) != Frame::WEBTRANSPORT {
             tracing::debug!(?typ, "ignoring unknown bidirectional stream");
             return Ok(None);
         }
 
         // Read the session ID and validate it.
-        let (session_id, id_width) = VarInt::read_with_width(&mut recv)
-            .await
-            .map_err(|_| WebTransportError::UnknownSession)?;
+        let (session_id, id_width) = read_varint_with_width(&mut recv).await?;
         if session_id != expected_session {
             return Err(WebTransportError::UnknownSession.into());
         }
@@ -1224,9 +1212,42 @@ impl SessionAccept {
     }
 }
 
+// Read a stream header VarInt, keeping the read's real cause. `VarInt::read` reports any
+// failure as a truncation, which would hide a stream the peer reset before its header
+// arrived.
+async fn read_varint_with_width(
+    recv: &mut quinn::RecvStream,
+) -> Result<(VarInt, usize), WebTransportError> {
+    let mut buf = [0u8; 8];
+    recv.read_exact(&mut buf[..1]).await?;
+
+    // The first two bits encode the length.
+    let size = 1 << (buf[0] >> 6);
+    recv.read_exact(&mut buf[1..size]).await?;
+
+    Ok((
+        VarInt::decode(&mut &buf[..size]).expect("a complete varint"),
+        size,
+    ))
+}
+
+// Without reliable reset, a stream the peer resets early loses its header with it, which
+// is routine for some applications. Anything else is a misbehaving peer.
+fn log_header_error(err: SessionError, direction: &'static str) {
+    match err {
+        SessionError::WebTransportError(WebTransportError::ReadError(
+            quinn::ReadExactError::ReadError(
+                quinn::ReadError::Reset(_) | quinn::ReadError::ConnectionLost(_),
+            ),
+        )) => tracing::debug!(?err, direction, "stream closed before its header"),
+        _ => tracing::warn!(?err, direction, "failed to decode stream header"),
+    }
+}
+
 pub struct SessionStats {
     stats: quinn::ConnectionStats,
     rtt: std::time::Duration,
+    pacing_rate: Option<u64>,
 }
 
 impl web_transport_trait::Stats for SessionStats {
@@ -1259,6 +1280,10 @@ impl web_transport_trait::Stats for SessionStats {
     }
 
     fn estimated_send_rate(&self) -> Option<u64> {
+        // BBR reports 0 until its first rate sample.
+        if let Some(pacing_rate) = self.pacing_rate.filter(|rate| *rate > 0) {
+            return Some(pacing_rate);
+        }
         let rtt_secs = self.rtt.as_secs_f64();
         if self.stats.path.cwnd > 0 && rtt_secs > 0.0 {
             Some((self.stats.path.cwnd as f64 * 8.0 / rtt_secs) as u64)
@@ -1385,7 +1410,8 @@ impl Session {
     async fn open_uni_owned(
         conn: quinn::Connection,
         header: Bytes,
-        error: Arc<OnceLock<SessionError>>,
+        error: Arc<CloseReason>,
+        raw: bool,
         draft16: bool,
         flow: Option<Arc<SessionFlow>>,
     ) -> Result<SendStream, SessionError> {
@@ -1408,7 +1434,7 @@ impl Session {
             .map_err(|e| Self::map_error_owned(&error, e))?;
         send.set_priority(0).ok();
 
-        let mut send = SendStream::new(send, error);
+        let mut send = SendStream::new(send, error, raw);
         if draft16 {
             send.set_reliable_prefix(header.len() as u64);
             if let Some(flow) = flow {
@@ -1421,7 +1447,8 @@ impl Session {
     async fn open_bi_owned(
         conn: quinn::Connection,
         header: Bytes,
-        error: Arc<OnceLock<SessionError>>,
+        error: Arc<CloseReason>,
+        raw: bool,
         draft16: bool,
         flow: Option<Arc<SessionFlow>>,
     ) -> Result<(SendStream, RecvStream), SessionError> {
@@ -1442,14 +1469,14 @@ impl Session {
             .map_err(|e| Self::map_error_owned(&error, e))?;
         send.set_priority(0).ok();
 
-        let mut send = SendStream::new(send, error.clone());
+        let mut send = SendStream::new(send, error.clone(), raw);
         if draft16 {
             send.set_reliable_prefix(header.len() as u64);
             if let Some(flow) = flow {
                 send.set_flow(flow);
             }
         }
-        Ok((send, RecvStream::new(recv, error)))
+        Ok((send, RecvStream::new(recv, error, raw)))
     }
 
     fn send_datagram_framed(
@@ -1495,7 +1522,7 @@ impl Session {
     async fn read_datagram_owned(
         conn: quinn::Connection,
         session_id: Option<VarInt>,
-        error: Arc<OnceLock<SessionError>>,
+        error: Arc<CloseReason>,
     ) -> Result<Bytes, SessionError> {
         let mut datagram = conn
             .read_datagram()
@@ -1550,7 +1577,7 @@ impl web_transport_trait::poll::Session for Session {
                 .accept_uni()
                 .await
                 .map_err(|e| Session::map_error_owned(&error, e))?;
-            Ok(RecvStream::new(recv, error))
+            Ok(RecvStream::new(recv, error, true))
         })
     }
 
@@ -1584,8 +1611,8 @@ impl web_transport_trait::poll::Session for Session {
                 .await
                 .map_err(|e| Session::map_error_owned(&error, e))?;
             Ok((
-                SendStream::new(send, error.clone()),
-                RecvStream::new(recv, error),
+                SendStream::new(send, error.clone(), true),
+                RecvStream::new(recv, error, true),
             ))
         })
     }
@@ -1594,11 +1621,12 @@ impl web_transport_trait::poll::Session for Session {
         let conn = self.conn.clone();
         let header = self.header_uni.clone();
         let error = self.error.clone();
+        let raw = self.is_raw();
         let draft16 = self.draft16;
         let flow = self.flow.clone();
 
         self.op_open_uni.poll(cx, move || async move {
-            Session::open_uni_owned(conn, header, error, draft16, flow).await
+            Session::open_uni_owned(conn, header, error, raw, draft16, flow).await
         })
     }
 
@@ -1609,11 +1637,12 @@ impl web_transport_trait::poll::Session for Session {
         let conn = self.conn.clone();
         let header = self.header_bi.clone();
         let error = self.error.clone();
+        let raw = self.is_raw();
         let draft16 = self.draft16;
         let flow = self.flow.clone();
 
         self.op_open_bi.poll(cx, move || async move {
-            Session::open_bi_owned(conn, header, error, draft16, flow).await
+            Session::open_bi_owned(conn, header, error, raw, draft16, flow).await
         })
     }
 
@@ -1659,5 +1688,135 @@ impl web_transport_trait::poll::Session for Session {
     #[allow(refining_impl_trait)]
     fn stats(&self) -> SessionStats {
         Self::stats(self)
+    }
+}
+
+#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+mod tests {
+    use std::{net::Ipv4Addr, sync::Arc};
+
+    use rcgen::{CertifiedKey, KeyPair};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    use super::*;
+
+    const SESSION: VarInt = VarInt::from_u32(0);
+
+    /// A connected client and server QUIC connection, plus the endpoints that drive them.
+    async fn pair() -> (quinn::Connection, quinn::Connection, [quinn::Endpoint; 2]) {
+        pair_with(Default::default()).await
+    }
+
+    /// [`pair`], with the client using `transport`.
+    async fn pair_with(
+        transport: quinn::TransportConfig,
+    ) -> (quinn::Connection, quinn::Connection, [quinn::Endpoint; 2]) {
+        #[cfg(all(feature = "aws-lc-rs", feature = "ring"))]
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KeyPair::serialize_der(
+            &signing_key,
+        )));
+
+        let server_config =
+            quinn::ServerConfig::with_single_cert(vec![cert.der().clone()], key).unwrap();
+        let server =
+            quinn::Endpoint::server(server_config, (Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.der().clone()).unwrap();
+        let mut client_config =
+            quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
+        client_config.transport_config(Arc::new(transport));
+        let client = quinn::Endpoint::client((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+
+        let connecting = client
+            .connect_with(client_config, server.local_addr().unwrap(), "localhost")
+            .unwrap();
+        let accept = async { server.accept().await.unwrap().await.unwrap() };
+        let (client_conn, server_conn) = tokio::join!(async { connecting.await.unwrap() }, accept);
+
+        (client_conn, server_conn, [client, server])
+    }
+
+    fn assert_reset(err: SessionError) {
+        assert!(
+            matches!(
+                &err,
+                SessionError::WebTransportError(WebTransportError::ReadError(
+                    quinn::ReadExactError::ReadError(quinn::ReadError::Reset(code))
+                )) if code.into_inner() == 7
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A uni stream reset before its header arrived reports the reset, not a foreign session.
+    #[tokio::test]
+    async fn uni_reset_before_header() {
+        let (client, server, _endpoints) = pair().await;
+
+        // The stream type alone, so the reset also cuts off the session ID.
+        let mut send = client.open_uni().await.unwrap();
+        send.write_all(&[0x40, 0x54]).await.unwrap();
+        send.reset(7u32.into()).unwrap();
+
+        let recv = server.accept_uni().await.unwrap();
+        let err = SessionAccept::decode_uni(recv, SESSION)
+            .await
+            .err()
+            .unwrap();
+        assert_reset(err);
+    }
+
+    /// A bi stream reset before its header arrived reports the reset, not a foreign session.
+    #[tokio::test]
+    async fn bi_reset_before_header() {
+        let (client, server, _endpoints) = pair().await;
+
+        let (mut send, _recv) = client.open_bi().await.unwrap();
+        send.reset(7u32.into()).unwrap();
+
+        let (send, recv) = server.accept_bi().await.unwrap();
+        let err = SessionAccept::decode_bi(send, recv, SESSION)
+            .await
+            .err()
+            .unwrap();
+        assert_reset(err);
+    }
+
+    /// A stream that names another session is still reported as `UnknownSession`.
+    #[tokio::test]
+    async fn uni_other_session() {
+        let (client, server, _endpoints) = pair().await;
+
+        let mut send = client.open_uni().await.unwrap();
+        send.write_all(&[0x40, 0x54, 0x04]).await.unwrap();
+        send.finish().unwrap();
+
+        let recv = server.accept_uni().await.unwrap();
+        let err = SessionAccept::decode_uni(recv, SESSION)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                err,
+                SessionError::WebTransportError(WebTransportError::UnknownSession)
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A peer without datagram support reports a max datagram size of 0 instead of panicking.
+    #[tokio::test]
+    async fn no_datagram_support() {
+        let mut transport = quinn::TransportConfig::default();
+        transport.datagram_receive_buffer_size(None);
+        let (_client, server, _endpoints) = pair_with(transport).await;
+
+        assert_eq!(Session::raw(server).max_datagram_size(), 0);
     }
 }

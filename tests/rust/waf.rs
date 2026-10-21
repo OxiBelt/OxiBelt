@@ -3474,6 +3474,61 @@ body = "normalized"
 }
 
 #[test]
+fn normalized_request_view_uses_unicode_18_without_rewriting_raw_query() {
+  let temp_dir = common::TempDir::new("waf-unicode-18");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "waf-unicode-18");
+  let rules = format!(
+    r#"
+[waf]
+enabled = true
+mode = "enforcing"
+fail_policy = "closed"
+
+[[waf.rules]]
+name = "unicode-18-normalized-view"
+phase = "request"
+priority = 10
+when = "Request.Http.Query == 'q=a%D7%88%CC%81' && Request.Normalized.QueryParams.get('q') == '{normalized}'"
+
+[[waf.rules.actions]]
+type = "reject"
+status = 403
+body = "unicode-18"
+"#,
+    normalized = "\u{00e1}\u{05c8}",
+  );
+  let raw = format!(
+    "{}\n{rules}",
+    common::minimal_config_toml(&cert_path, &key_path),
+  );
+  let config: Config = toml::from_str(&raw).expect("config should parse");
+  config.validate().expect("config should validate");
+  let engine = WafEngine::new(&config).expect("WAF should compile");
+  let headers = HeaderMap::new();
+  let tags = HashMap::new();
+  let method = Method::GET;
+
+  for (query, expected_status) in [
+    ("q=a%D7%88%CC%81", Some(StatusCode::FORBIDDEN)),
+    ("q=a%D7%88", None),
+  ] {
+    let uri: Uri = format!("/safe?{query}").parse().expect("URI should parse");
+    let decision = engine.evaluate_request(request_input(
+      &method,
+      &uri,
+      &headers,
+      &tags,
+      "203.0.113.10:49152".parse().unwrap(),
+    ));
+    assert_eq!(
+      decision.terminal.as_ref().map(|terminal| terminal.status),
+      expected_status,
+    );
+    assert_eq!(uri.query(), Some(query));
+  }
+}
+
+#[test]
 fn request_and_response_body_text_scan_helpers_match_bounded_bodies() {
   let temp_dir = common::TempDir::new("waf-body-scan-helpers");
   let (cert_path, key_path) =

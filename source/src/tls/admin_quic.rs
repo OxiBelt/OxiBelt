@@ -85,6 +85,9 @@ pub(crate) fn build_admin_quic_server_config_with_crypto_and_resumption(
       mode: tls.resumption.mode,
       server_identity: certificate_identity(&identity_certs),
       client_auth_identity: client_auth_identity(&tls.client_auth)?,
+      quic_datagram_frame_size: Some(crate::quic::downstream_datagram_frame_limit(
+        &quic.downstream.transport,
+      )?),
       alpn_family: "admin-h3",
       tls_provider: crypto.tls_provider,
       enable_secp256r1mlkem768: tls.enable_secp256r1mlkem768,

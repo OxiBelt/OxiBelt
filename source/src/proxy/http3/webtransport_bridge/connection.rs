@@ -30,6 +30,7 @@ pub(super) struct DownstreamWebTransportConnection {
   opener: StdMutex<H3OpenStreams>,
   wire_draft: WebTransportWireDraft,
   peer_initial_credit: (u64, u64, u64),
+  datagram_frame_limit: usize,
 }
 
 impl DownstreamWebTransportConnection {
@@ -47,7 +48,11 @@ impl DownstreamWebTransportConnection {
       .map_err(|_| anyhow::anyhow!("downstream HTTP/3 opener state is unavailable"))
   }
 
-  pub(super) fn new(conn: H3ServerConnection, wire_draft: WebTransportWireDraft) -> Self {
+  pub(super) fn new(
+    conn: H3ServerConnection,
+    wire_draft: WebTransportWireDraft,
+    datagram_frame_limit: usize,
+  ) -> Self {
     let peer = conn.settings();
     let peer_initial_credit = (
       peer.wt_initial_max_streams_uni(),
@@ -61,11 +66,25 @@ impl DownstreamWebTransportConnection {
       opener: StdMutex::new(opener),
       wire_draft,
       peer_initial_credit,
+      datagram_frame_limit,
     }
   }
 
   pub(super) fn wire_draft(&self) -> WebTransportWireDraft {
     self.wire_draft
+  }
+
+  pub(super) fn required_upstream_datagram_payload(&self, stream_id: StreamId) -> Option<usize> {
+    // h3-datagram uses the HTTP Datagram quarter-stream ID for both
+    // downstream dialects; this is distinct from data-stream association IDs.
+    let quarter_id = stream_id.into_inner() / 4;
+    let width = match quarter_id {
+      0..=63 => 1,
+      64..=16_383 => 2,
+      16_384..=1_073_741_823 => 4,
+      _ => 8,
+    };
+    crate::quic::webtransport_datagrams::required_upstream_payload(self.datagram_frame_limit, width)
   }
 
   pub(super) fn peer_initial_credit(&self) -> (u64, u64, u64) {

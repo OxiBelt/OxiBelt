@@ -1,15 +1,19 @@
+use crate::error::CloseReason;
 use std::{
     io,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 
+use crate::flow::SessionFlow;
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
-use crate::flow::SessionFlow;
 
-use crate::{ClosedStream, SessionError, WriteError};
+use crate::{
+    error::{decode_stream_code, encode_stream_code},
+    ClosedStream, SessionError, WriteError,
+};
 
 /// A stream that can be used to send bytes. See [`quinn::SendStream`].
 ///
@@ -18,7 +22,8 @@ use crate::{ClosedStream, SessionError, WriteError};
 #[derive(Debug)]
 pub struct SendStream {
     stream: quinn::SendStream,
-    error: Arc<OnceLock<SessionError>>,
+    error: Arc<CloseReason>,
+    raw: bool,
     reliable_prefix: Option<u64>,
     flow: Option<Arc<SessionFlow>>,
 
@@ -27,19 +32,27 @@ pub struct SendStream {
 }
 
 impl SendStream {
-    pub(crate) fn new(stream: quinn::SendStream, error: Arc<OnceLock<SessionError>>) -> Self {
+    pub(crate) fn new(stream: quinn::SendStream, error: Arc<CloseReason>, raw: bool) -> Self {
         Self {
             stream,
             error,
+            raw,
             reliable_prefix: None,
             flow: None,
             closed: Default::default(),
         }
     }
 
-    /// Replace connection-level errors with the stored session error if available.
-    fn map_error(&self, e: impl Into<WriteError>) -> WriteError {
-        let e = e.into();
+    /// Decode the peer's stop code, and replace connection-level errors with the stored
+    /// session error if available.
+    fn map_error(&self, e: quinn::WriteError) -> WriteError {
+        let e = match e {
+            quinn::WriteError::Stopped(code) => match decode_stream_code(code, self.raw) {
+                Some(code) => WriteError::Stopped(code),
+                None => WriteError::InvalidStopped(code),
+            },
+            e => e.into(),
+        };
         if let Some(err) = self.error.get() {
             if matches!(
                 &e,
@@ -48,14 +61,16 @@ impl SendStream {
                 return WriteError::SessionError(err.clone());
             }
         }
-        e
+        match e {
+            WriteError::SessionError(err) => WriteError::SessionError(self.error.map(err)),
+            err => err,
+        }
     }
 
     /// Abruptly reset the stream with the provided error code. See [`quinn::SendStream::reset`].
     /// This is a u32 with WebTransport because we share the error space with HTTP/3.
     pub fn reset(&mut self, code: u32) -> Result<(), io::Error> {
-        let code = web_transport_proto::error_to_http3(code);
-        let code = quinn::VarInt::try_from(code).unwrap();
+        let code = encode_stream_code(code, self.raw);
         match self.reliable_prefix {
             Some(bytes) => self.stream.reset_at(code, bytes).map_err(io::Error::other),
             None => self.stream.reset(code).map_err(io::Error::other),
@@ -76,10 +91,10 @@ impl SendStream {
     /// Also unlike Quinn, this returns a SessionError, not a StoppedError, because 0-RTT is not supported.
     pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
         match self.stream.stopped().await {
-            Ok(Some(code)) => Ok(web_transport_proto::error_from_http3(code.into_inner())),
+            Ok(Some(code)) => Ok(decode_stream_code(code, self.raw)),
             Ok(None) => Ok(None),
             Err(quinn::StoppedError::ConnectionLost(conn_err)) => {
-                Err(self.error.get().cloned().unwrap_or_else(|| conn_err.into()))
+                Err(self.error.map(conn_err.into()))
             }
             Err(quinn::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
         }
@@ -90,7 +105,9 @@ impl SendStream {
     /// Write some data to the stream, returning the size written. See [`quinn::SendStream::write`].
     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, WriteError> {
         if self.flow.is_some() {
-            AsyncWriteExt::write(self, buf).await.map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))
+            AsyncWriteExt::write(self, buf)
+                .await
+                .map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))
         } else {
             self.stream.write(buf).await.map_err(|e| self.map_error(e))
         }
@@ -99,9 +116,14 @@ impl SendStream {
     /// Write all of the data to the stream. See [`quinn::SendStream::write_all`].
     pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), WriteError> {
         if self.flow.is_some() {
-            AsyncWriteExt::write_all(self, buf).await.map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))
+            AsyncWriteExt::write_all(self, buf)
+                .await
+                .map_err(|_| WriteError::SessionError(quinn::ConnectionError::LocallyClosed.into()))
         } else {
-            self.stream.write_all(buf).await.map_err(|e| self.map_error(e))
+            self.stream
+                .write_all(buf)
+                .await
+                .map_err(|e| self.map_error(e))
         }
     }
 
@@ -109,14 +131,25 @@ impl SendStream {
     pub async fn write_chunks(&mut self, bufs: &mut [Bytes]) -> Result<quinn::Written, WriteError> {
         if self.flow.is_some() {
             for (index, chunk) in bufs.iter_mut().enumerate() {
-                if chunk.is_empty() { continue; }
+                if chunk.is_empty() {
+                    continue;
+                }
                 let written = self.write(chunk).await?;
                 *chunk = chunk.slice(written..);
-                return Ok(quinn::Written { bytes: written, chunks: index + usize::from(chunk.is_empty()) });
+                return Ok(quinn::Written {
+                    bytes: written,
+                    chunks: index + usize::from(chunk.is_empty()),
+                });
             }
-            Ok(quinn::Written { bytes: 0, chunks: bufs.len() })
+            Ok(quinn::Written {
+                bytes: 0,
+                chunks: bufs.len(),
+            })
         } else {
-            self.stream.write_chunks(bufs).await.map_err(|e| self.map_error(e))
+            self.stream
+                .write_chunks(bufs)
+                .await
+                .map_err(|e| self.map_error(e))
         }
     }
 
@@ -172,19 +205,28 @@ impl tokio::io::AsyncWrite for SendStream {
         let Some(flow) = self.flow.clone() else {
             return tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.stream), cx, buf);
         };
-        if buf.is_empty() { return Poll::Ready(Ok(0)); }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let mut outgoing = flow.outgoing.lock().unwrap();
         let available = outgoing.max_data.saturating_sub(outgoing.used_data);
         if available == 0 {
             flow.register_outgoing(cx.waker());
-            if outgoing.max_data == outgoing.used_data { return Poll::Pending; }
+            if outgoing.max_data == outgoing.used_data {
+                return Poll::Pending;
+            }
         }
-        let limit = usize::try_from(available).unwrap_or(usize::MAX).min(buf.len());
-        let result = tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.stream), cx, &buf[..limit]);
+        let limit = usize::try_from(available)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        let result =
+            tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.stream), cx, &buf[..limit]);
         if let Poll::Ready(Ok(written)) = result {
             if outgoing.use_data(written as u64).is_err() {
                 flow.fail();
-                return Poll::Ready(Err(io::Error::other("WebTransport flow control accounting failed")));
+                return Poll::Ready(Err(io::Error::other(
+                    "WebTransport flow control accounting failed",
+                )));
             }
         }
         result
@@ -202,8 +244,8 @@ impl tokio::io::AsyncWrite for SendStream {
 impl web_transport_trait::SendStream for SendStream {
     type Error = WriteError;
 
-    fn set_priority(&mut self, order: u8) {
-        Self::set_priority(self, order.into()).ok();
+    fn set_priority(&mut self, order: i32) {
+        Self::set_priority(self, order).ok();
     }
 
     fn reset(&mut self, code: u32) {
@@ -255,8 +297,8 @@ impl web_transport_trait::poll::SendStream for SendStream {
     // faster but loses data: the chunk would be gone from `buf` before Quinn
     // accepted it, a silent hole in the stream if the write does not complete.
 
-    fn set_priority(&mut self, order: u8) {
-        Self::set_priority(self, order.into()).ok();
+    fn set_priority(&mut self, order: i32) {
+        Self::set_priority(self, order).ok();
     }
 
     fn reset(&mut self, code: u32) {
@@ -273,18 +315,17 @@ impl web_transport_trait::poll::SendStream for SendStream {
         // registration and we would never be woken.
         let stopped = self.stream.stopped();
         let error = self.error.clone();
+        let raw = self.raw;
 
         self.closed.poll(cx, move || async move {
             match stopped.await {
-                Ok(Some(code)) => match web_transport_proto::error_from_http3(code.into_inner()) {
+                Ok(Some(code)) => match decode_stream_code(code, raw) {
                     Some(code) => Err(WriteError::Stopped(code)),
                     None => Err(WriteError::InvalidStopped(code)),
                 },
                 Ok(None) => Ok(()),
                 Err(quinn::StoppedError::ConnectionLost(conn_err)) => {
-                    Err(WriteError::SessionError(
-                        error.get().cloned().unwrap_or_else(|| conn_err.into()),
-                    ))
+                    Err(WriteError::SessionError(error.map(conn_err.into())))
                 }
                 Err(quinn::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
             }

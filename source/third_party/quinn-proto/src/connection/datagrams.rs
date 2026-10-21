@@ -124,9 +124,18 @@ impl DatagramState {
     pub(super) fn received(
         &mut self,
         datagram: Datagram,
-        window: &Option<usize>,
+        encoded_size: usize,
+        config: &crate::TransportConfig,
     ) -> Result<bool, TransportError> {
-        let window = match window {
+        if config
+            .get_datagram_max_frame_size()
+            .is_none_or(|limit| encoded_size as u64 > limit.into_inner())
+        {
+            return Err(TransportError::PROTOCOL_VIOLATION(
+                "DATAGRAM frame exceeds advertised limit",
+            ));
+        }
+        let window = match &config.datagram_receive_buffer_size {
             None => {
                 return Err(TransportError::PROTOCOL_VIOLATION(
                     "unexpected DATAGRAM frame",
@@ -353,4 +362,93 @@ pub enum SendDatagramError {
     /// Send would block
     #[error("datagram send blocked")]
     Blocked(Bytes),
+}
+
+#[cfg(test)]
+mod frame_cap_tests {
+    use super::*;
+    use crate::{frame, TransportConfig, TransportErrorCode, VarInt};
+
+    fn wire_datagram(payload: usize, length_width: Option<usize>) -> Bytes {
+        let mut wire = vec![if length_width.is_some() { 0x31 } else { 0x30 }];
+        if let Some(width) = length_width {
+            let mut length = (payload as u64).to_be_bytes()[8 - width..].to_vec();
+            length[0] |= match width {
+                1 => 0,
+                2 => 0x40,
+                4 => 0x80,
+                8 => 0xc0,
+                _ => unreachable!(),
+            };
+            wire.extend(length);
+        }
+        wire.extend(std::iter::repeat_n(0xab, payload));
+        wire.into()
+    }
+
+    #[test]
+    fn exact_received_wire_limit_includes_nonminimal_lengths_and_preserves_queue_accounting() {
+        for width in [None, Some(1), Some(2), Some(4), Some(8)] {
+            let wire = wire_datagram(60, width);
+            for delta in [-1isize, 0, 1] {
+                let mut config = TransportConfig::default();
+                config.datagram_receive_buffer_size(Some(1 << 20));
+                config.datagram_max_frame_size(Some(VarInt::from_u32(
+                    (wire.len() as isize + delta) as u32,
+                )));
+                let frame::Frame::Datagram {
+                    datagram,
+                    encoded_size,
+                } = frame::Iter::new(wire.clone())
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                else {
+                    panic!("expected DATAGRAM")
+                };
+                assert_eq!(encoded_size, wire.len());
+                let mut state = DatagramState::default();
+                let result = state.received(datagram, encoded_size, &config);
+                if delta < 0 {
+                    assert_eq!(
+                        result.unwrap_err().code,
+                        TransportErrorCode::PROTOCOL_VIOLATION
+                    );
+                    assert!(state.recv().is_none());
+                } else {
+                    assert_eq!(result, Ok(true));
+                    assert_eq!(state.incoming.memory_used(), 60 + size_of::<Datagram>());
+                    assert_eq!(state.recv().unwrap(), Bytes::from(vec![0xab; 60]));
+                    assert_eq!(state.incoming.memory_used(), 0);
+                }
+                assert_eq!(config.datagram_receive_buffer_size, Some(1 << 20));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_frame_limit_does_not_enable_disabled_or_overfill_small_receive_buffer() {
+        let mut config = TransportConfig::default();
+        config.datagram_max_frame_size(Some(VarInt::from_u32(1144)));
+        config.datagram_receive_buffer_size(None);
+        assert!(config.get_datagram_max_frame_size().is_none());
+        let mut state = DatagramState::default();
+        assert!(state
+            .received(Datagram { data: Bytes::new() }, 1, &config)
+            .is_err());
+        config.datagram_receive_buffer_size(Some(100));
+        let cap = config.get_datagram_max_frame_size().unwrap().into_inner() as usize;
+        assert_eq!(cap, 100 - size_of::<Datagram>() + 1);
+        assert!(state
+            .received(
+                Datagram {
+                    data: Bytes::from(vec![0; cap - 1])
+                },
+                cap,
+                &config
+            )
+            .is_ok());
+        assert_eq!(state.incoming.memory_used(), 100);
+    }
 }

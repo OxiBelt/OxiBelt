@@ -432,6 +432,36 @@ pub(super) async fn accept_webtransport_session(
       }
     };
 
+  if let Err(error) = crate::quic::webtransport_datagrams::validate_upstream_capacity(
+    downstream.required_upstream_datagram_payload(connect_stream_id),
+    upstream.datagram_capacity_before_accept(),
+  ) {
+    warn!(?session_id, %error, "upstream WebTransport datagram capacity is incompatible");
+    // No session has been published and no forwarding tasks exist yet. Closing
+    // the opened session and dropping its guard/permits releases all reservations.
+    upstream.close(0, b"WebTransport datagram capacity is incompatible");
+    drop(upstream);
+    drop(upstream_connection_guard);
+    drop(buffer_reservation);
+    drop(connection_permits);
+    trace_webtransport_connect(
+      &udp_connection_id,
+      peer_addr,
+      connect_stream_id,
+      Some(StatusCode::BAD_GATEWAY),
+      "upstream_datagram_capacity",
+    );
+    respond_to_h3_request(
+      stream,
+      shape_prepared_response(text_response(
+        StatusCode::BAD_GATEWAY,
+        "upstream WebTransport datagram capacity is incompatible",
+      )),
+    )
+    .await?;
+    return Ok(());
+  }
+
   let mut response_builder = Response::builder().status(StatusCode::OK);
   if let Some(protocol) = upstream.selected_protocol() {
     response_builder = response_builder.header("wt-protocol", selected_protocol_header(protocol)?);

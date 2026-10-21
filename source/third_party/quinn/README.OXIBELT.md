@@ -13,3 +13,8 @@ The ordinary `reset` API is unchanged.
 The root `Cargo.toml` patches crates.io Quinn to this source. Review this
 delta against every future upstream Quinn release before removing the patch.
 Track upstream replacement in OxiBelt/OxiBelt#220.
+
+`Connection::max_receive_datagram_frame_size` exposes the adjacent protocol
+patch's immutable, complete incoming DATAGRAM frame limit. OxiBelt uses this
+read-only value for WebTransport upstream admission so an endpoint reload and
+a newer routing snapshot cannot substitute a different connection's limit.

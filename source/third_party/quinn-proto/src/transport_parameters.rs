@@ -170,9 +170,7 @@ impl TransportParameters {
                 CidQueue::LEN as u32
             }
             .into(),
-            max_datagram_frame_size: config
-                .datagram_receive_buffer_size
-                .map(|x| (x.min(u16::MAX.into()) as u16).into()),
+            max_datagram_frame_size: config.get_datagram_max_frame_size(),
             grease_quic_bit: endpoint_config.grease_quic_bit,
             reset_stream_at: true,
             min_ack_delay: Some(

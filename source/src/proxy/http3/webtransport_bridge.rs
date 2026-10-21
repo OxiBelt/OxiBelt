@@ -99,6 +99,7 @@ enum DownstreamBidiEvent {
 pub(super) async fn serve_webtransport_connection(
   h3_connection: H3ServerConnection,
   wire_draft: WebTransportWireDraft,
+  datagram_frame_limit: usize,
   initial_request: Request<()>,
   initial_stream: H3RequestStream,
   peer_addr: SocketAddr,
@@ -116,6 +117,7 @@ pub(super) async fn serve_webtransport_connection(
   let downstream = Arc::new(DownstreamWebTransportConnection::new(
     h3_connection,
     wire_draft,
+    datagram_frame_limit,
   ));
   let (events_tx, mut events_rx) = mpsc::channel(256);
   let mut downstream_tasks = spawn_downstream_reader_tasks(downstream.clone(), events_tx.clone());
@@ -590,3 +592,6 @@ mod dedicated_connection_tests {
     );
   }
 }
+
+#[cfg(test)]
+mod datagram_capacity_tests;

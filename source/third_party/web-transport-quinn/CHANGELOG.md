@@ -31,6 +31,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3](https://github.com/moq-dev/web-transport/compare/web-transport-quinn-v0.13.2...web-transport-quinn-v0.13.3) - 2026-10-20
+
+### Other
+
+- *(deps)* update kio requirement from 0.5.4 to 0.6.2 in the cargo group across 1 directory ([#415](https://github.com/moq-dev/web-transport/pull/415))
+
+## [0.13.2](https://github.com/moq-dev/web-transport/compare/web-transport-quinn-v0.13.1...web-transport-quinn-v0.13.2) - 2026-10-06
+
+### Fixed
+
+- report 0 max datagram size without datagram support in quinn, noq, and iroh ([#416](https://github.com/moq-dev/web-transport/pull/416))
+
+## [0.13.1](https://github.com/moq-dev/web-transport/compare/web-transport-quinn-v0.13.0...web-transport-quinn-v0.13.1) - 2026-10-02
+
+### Fixed
+
+- *(quinn)* preserve raw QUIC application close codes ([#409](https://github.com/moq-dev/web-transport/pull/409))
+- send raw QUIC stream codes as is in iroh and quinn ([#408](https://github.com/moq-dev/web-transport/pull/408))
+- report a stream reset before its header as a reset ([#405](https://github.com/moq-dev/web-transport/pull/405))
+
 ## [0.12.1](https://github.com/moq-dev/web-transport/compare/web-transport-quinn-v0.12.0...web-transport-quinn-v0.12.1) - 2026-08-20
 
 ### Other

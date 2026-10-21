@@ -22,3 +22,20 @@ Initial and loss-probe padding now honors the configured minimum MTU, bounded
 by the peer's maximum UDP payload size; the default minimum remains 1200.
 The shipped upstream `Cargo.lock` is copied unchanged from the checksum-verified
 0.11.19 archive; the root lock owns production.
+
+The local DATAGRAM frame-limit extension separates the advertised complete-frame
+limit from the aggregate receive-buffer budget. `datagram_max_frame_size(None)`
+retains the upstream limit derived from that buffer; an explicit cap also leaves
+room for one buffered datagram's existing bookkeeping and never increases the
+queue. Received frame accounting includes the actual encoded type and length,
+including a legal nonminimal length varint. Frames exceeding the advertised
+limit fail with `PROTOCOL_VIOLATION` before being queued. Queue accounting and
+per-send payload checks remain in force.
+
+OxiBelt uses a downstream cap of at most 1144 bytes, reserving the conservative
+1200-byte QUIC path floor, maximum CID and packet-number widths, AEAD tag,
+DATAGRAM header, and upstream WebTransport association ID. The upstream leg
+keeps its independent limit. A caller lowering a frame limit while accepting
+0-RTT must isolate its resumption context; OxiBelt binds the effective limit
+into both its stateful-cache and stateless-ticket registry keys. Review this
+extension and its wire-width, queue, and path-fallback tests on every rebase.

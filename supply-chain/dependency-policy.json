@@ -17,8 +17,8 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "faa53971ea8eb99c7f89700f52e77274dba5a519a18ef165609892b25b7e862f",
-      "exemptionInventorySha256": "6b4585c43b5ab022db21374af8c54e1870724ca0893b711bc5d6a760890067a8",
+      "lockfileSha256": "77a9f608b0e414c5d89b555de1cc87ac539f2c29ce20597a3ea553467ec8f9e0",
+      "exemptionInventorySha256": "7df6b2a350966d4baa6a60fe386e3ad6398596939b58d72225f19537449e032f",
       "exemptedPackageVersions": 452
     },
     "reviewTriggers": [
@@ -46,13 +46,17 @@
         "0.22",
         "0.23"
       ],
+      "bindgen": [
+        "0.72",
+        "0.73"
+      ],
       "bit-set": [
-        "0.8",
-        "0.9"
+        "0.11",
+        "0.8"
       ],
       "bit-vec": [
-        "0.8",
-        "0.9"
+        "0.10",
+        "0.8"
       ],
       "bitflags": [
         "1",
@@ -109,7 +113,7 @@
       ],
       "granit-parser": [
         "0.0.7",
-        "1"
+        "2"
       ],
       "hashbrown": [
         "0.15",
@@ -122,7 +126,6 @@
       ],
       "itertools": [
         "0.13",
-        "0.14",
         "0.15"
       ],
       "password-hash": [
@@ -132,6 +135,10 @@
       "pem-rfc7468": [
         "0.7",
         "1"
+      ],
+      "prettyplease": [
+        "0.2",
+        "0.3"
       ],
       "r-efi": [
         "5",
@@ -147,7 +154,7 @@
       ],
       "serde-saphyr": [
         "0.0.29",
-        "1"
+        "2"
       ],
       "sha2": [
         "0.10",
@@ -258,13 +265,13 @@
         "upstreamRepository": "https://github.com/quinn-rs/quinn",
         "upstreamArchiveSha256": "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11",
         "manifestPath": "supply-chain/quinn-source.sha256",
-        "manifestSha256": "f81b1ee80021bb74d027c18a5a98deaca1161e58020e19db6c1708219b1516d6",
+        "manifestSha256": "5ff6de5561f7628499c0ce4e4d9fd5722bc7351375a90aa156611c9c458dc35e",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-09-25",
+        "reviewedOn": "2026-10-21",
         "maintenanceReviewIntervalDays": 30,
-        "removalCriteria": "Replace this patch when an upstream Quinn release exposes draft-09 RESET_STREAM_AT negotiation, sending, and receive final-size metadata. Review every Quinn update and rerun the protocol and dependency admission suites."
+        "removalCriteria": "Replace this patch when an upstream Quinn release exposes draft-09 RESET_STREAM_AT negotiation, sending, and receive final-size metadata. Review every Quinn update and rerun the protocol and dependency admission suites. Require an equivalent read-only per-connection receive DATAGRAM frame limit for reload-safe admission."
       },
       {
         "name": "quinn-proto",
@@ -273,13 +280,13 @@
         "upstreamRepository": "https://github.com/quinn-rs/quinn",
         "upstreamArchiveSha256": "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe",
         "manifestPath": "supply-chain/quinn-proto-source.sha256",
-        "manifestSha256": "6e07bb4a9bb7597ea34ccba62b61f132b0b73b572044258c73c3de94f0e91c54",
+        "manifestSha256": "bd46d3f8c7a5fc6ee45f007c2dfefea99c405592d12ebba5bc27529f4d1ac798",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-10-20",
+        "reviewedOn": "2026-10-21",
         "maintenanceReviewIntervalDays": 30,
-        "removalCriteria": "Replace this patch when upstream quinn-proto implements draft-ietf-quic-reliable-stream-reset-09 transport parameters, frames, reliable prefix retransmission, final-size accounting, and 0-RTT compatibility. Review every update and rerun protocol tests."
+        "removalCriteria": "Replace this patch when upstream quinn-proto implements draft-ietf-quic-reliable-stream-reset-09 transport parameters, frames, reliable prefix retransmission, final-size accounting, and 0-RTT compatibility, plus independent complete DATAGRAM frame limits and exact received-wire enforcement. Review every update and rerun protocol and ticket-transition tests."
       },
       {
         "name": "web-transport-proto",
@@ -298,16 +305,16 @@
       },
       {
         "name": "web-transport-quinn",
-        "version": "0.12.1",
+        "version": "0.13.3",
         "path": "source/third_party/web-transport-quinn",
         "upstreamRepository": "https://github.com/moq-dev/web-transport",
-        "upstreamArchiveSha256": "63a239cba370789ab705c39b66d223e3b8aef85e2762046fd6b59e560f156756",
+        "upstreamArchiveSha256": "251772dde5c7b78a532af0df7597259186456b683b46fc516745585684574a0e",
         "manifestPath": "supply-chain/web-transport-quinn-source.sha256",
-        "manifestSha256": "9e3e83e2d6cb077a2921574bcc32593499f6791a6b50081fef35d3289b43451d",
+        "manifestSha256": "742d562518a01e5f76103b7f1d1ee6b811a15c86a82f4164ad4e9723b8cef89e",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-09-26",
+        "reviewedOn": "2026-10-20",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this patch when upstream web-transport-quinn supports draft 16 CONNECT negotiation, session flow control, stream resets, and draft 02 compatibility. Review every update and rerun WebTransport and dependency admission suites."
       }
@@ -388,13 +395,13 @@
             "0.6.0"
           ],
           "aws-lc-fips-sys": [
-            "0.14.2"
+            "0.14.3"
           ],
           "aws-lc-rs": [
-            "1.18.1"
+            "1.18.2"
           ],
           "aws-lc-sys": [
-            "0.45.0"
+            "0.46.0"
           ],
           "chacha20poly1305": [
             "0.11.0"
@@ -458,7 +465,7 @@
             "0.1.21"
           ],
           "kio": [
-            "0.5.9"
+            "0.6.2"
           ],
           "quinn": [
             "0.11.12"
@@ -467,7 +474,7 @@
             "0.11.19"
           ],
           "quinn-udp": [
-            "0.5.15"
+            "0.5.16"
           ],
           "rustls": [
             "0.23.46"
@@ -482,10 +489,10 @@
             "0.6.2"
           ],
           "web-transport-quinn": [
-            "0.12.1"
+            "0.13.3"
           ],
           "web-transport-trait": [
-            "0.4.0"
+            "0.5.1"
           ]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
@@ -504,7 +511,7 @@
           ],
           "serde-saphyr": [
             "0.0.29",
-            "1.3.0"
+            "2.0.0"
           ],
           "serde_json": [
             "1.0.154"
@@ -643,12 +650,12 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:faa53971ea8eb99c7f89700f52e77274dba5a519a18ef165609892b25b7e862f",
-      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test.",
+      "subject": "Cargo.lock@sha256:77a9f608b0e414c5d89b555de1cc87ac539f2c29ce20597a3ea553467ec8f9e0",
+      "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test. The maintainer approved exactly bindgen 0.72/0.73 and prettyplease 0.2/0.3 coexistence through 2026-11-03 under issue #304 for retained OpenSSL and refreshed AWS-LC build-tool requirements; other compatibility lines remain frozen. The maintainer also approved replacing exactly bit-set 0.8/0.9 with 0.8/0.11 and bit-vec 0.8/0.9 with 0.8/0.10 through 2026-11-03 under issue #304 for refreshed LALRPOP; the obsolete itertools 0.14 line is retired.",
       "owner": "@piquark6046",
       "bootstrap": true,
       "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-10-20",
+      "reviewedOn": "2026-10-21",
       "expiresOn": "2026-11-03",
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
@@ -656,7 +663,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:faa53971ea8eb99c7f89700f52e77274dba5a519a18ef165609892b25b7e862f",
+      "subject": "Cargo.lock@sha256:77a9f608b0e414c5d89b555de1cc87ac539f2c29ce20597a3ea553467ec8f9e0",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -754,13 +761,13 @@
       "expiresOn": "2026-10-23"
     },
     {
-      "id": "rust-cargo-vet-web-transport-trait-0.4.0",
+      "id": "rust-cargo-vet-web-transport-trait-0.5.1",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "web-transport-trait@0.4.0:safe-to-deploy",
-      "rationale": "Whole-crate certification remains withheld because the generic async RecvStream::read_buf default transmutes BufMut spare capacity to a mutable byte slice and advances it without enforcing that a safe implementation returned a size within initialized storage. Version 0.4.0 adds poll::RecvStream::poll_read_buf and poll_read_chunk with the same unchecked pattern. OxiBelt confines WebTransport to a private adapter that uses web-transport-quinn's Tokio AsyncRead path into initialized storage and rejects direct generic, raw, or poll receive APIs outside that boundary; retain this exact-version exception pending an upstream redesign or dependency removal.",
+      "subject": "web-transport-trait@0.5.1:safe-to-deploy",
+      "rationale": "Whole-crate certification remains withheld because generic async and poll receive helpers reinterpret BufMut spare capacity as mutable bytes and rely on an unenforced initialized-length contract. OxiBelt confines WebTransport to a private adapter using web-transport-quinn's Tokio AsyncRead path into initialized storage and excludes direct generic, raw, and poll receive APIs. The maintainer approved replacing the exact 0.4.0 exception with 0.5.1 under issue 121, retaining this containment and bounded expiry pending an upstream redesign or dependency removal.",
       "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304",
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/121",
       "reviewedOn": "2026-10-20",
       "expiresOn": "2026-11-03"
     },

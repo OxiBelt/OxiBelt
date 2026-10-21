@@ -219,6 +219,7 @@ fn build_downstream_tcp_server_config_with_provider(
       mode: build.tls.resumption.mode,
       server_identity,
       client_auth_identity: client_auth_identity(&build.tls.client_auth)?,
+      quic_datagram_frame_size: None,
       alpn_family: "http1-http2",
       tls_provider: build.crypto.tls_provider,
       enable_secp256r1mlkem768,

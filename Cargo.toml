@@ -49,7 +49,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-aws-lc-rs = { version = "1.18.1", default-features = false }
+aws-lc-rs = { version = "1.18.2", default-features = false }
 brotli = "9.0.0"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
@@ -66,7 +66,7 @@ hyper-rustls = { version = "0.27.10", default-features = false, features = ["aws
 hyper-util = { version = "0.1.21", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 k8s-openapi = { version = "0.28.0", features = ["v1_35"] }
 kube = { version = "4.2.0", default-features = false, features = ["client", "runtime", "rustls-tls", "aws-lc-rs"] }
-libc = "0.2.189"
+libc = "0.2.191"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "net", "process", "signal", "socket", "zerocopy"] }
 oxibelt-allocator = { path = "source/crates/oxibelt-allocator", default-features = false }
 oxibelt-admission-policy = { path = "source/crates/oxibelt-admission-policy" }
@@ -91,11 +91,11 @@ rustix = { version = "1.1.5", features = ["net", "process", "std"] }
 sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-serde-saphyr = { version = "1.3.0", default-features = false, features = ["deserialize"] }
+serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize", "comments"] }
 sha2 = "0.11.1"
 strsim = "0.11.1"
 tempfile = "3.27.0"
-tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
 toml = "1.1.8"
 toml_edit = "0.25.17"

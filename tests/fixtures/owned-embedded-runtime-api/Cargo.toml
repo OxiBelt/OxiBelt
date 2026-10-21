@@ -12,7 +12,7 @@ build = false
 [dependencies]
 anyhow = "1.0.104"
 oxibelt = { path = "../../../source" }
-tokio = { version = "=1.53.1", features = ["sync"] }
+tokio = { version = "=1.53.3", features = ["sync"] }
 
 # This standalone downstream workspace must resolve the same reviewed
 # transport and TLS sources as the repository workspace. Cargo patches are

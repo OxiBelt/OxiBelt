@@ -20,6 +20,7 @@ use crate::config::{
 };
 
 pub(crate) mod h3;
+pub(crate) mod webtransport_datagrams;
 
 const QUIC_HOST_KEY_BYTES: usize = 64;
 const QUIC_HOST_KEY_RESET_LABEL: &[u8] = b"oxibelt quic stateless reset v1";
@@ -30,6 +31,34 @@ const QUIC_RETRY_TOKEN_NONCE: [u8; 12] = [0u8; 12];
 pub fn transport_config(
   config: &QuicTransportConfig,
   path: &'static str,
+) -> anyhow::Result<Arc<TransportConfig>> {
+  transport_config_with_datagram_limit(config, path, None)
+}
+
+pub(crate) fn downstream_transport_config(
+  config: &QuicTransportConfig,
+) -> anyhow::Result<Arc<TransportConfig>> {
+  transport_config_with_datagram_limit(
+    config,
+    "quic.downstream.transport",
+    Some(VarInt::from_u32(
+      webtransport_datagrams::DOWNSTREAM_FRAME_LIMIT,
+    )),
+  )
+}
+
+pub(crate) fn downstream_datagram_frame_limit(config: &QuicTransportConfig) -> anyhow::Result<u64> {
+  Ok(
+    downstream_transport_config(config)?
+      .get_datagram_max_frame_size()
+      .map_or(0, VarInt::into_inner),
+  )
+}
+
+fn transport_config_with_datagram_limit(
+  config: &QuicTransportConfig,
+  path: &'static str,
+  datagram_frame_limit: Option<VarInt>,
 ) -> anyhow::Result<Arc<TransportConfig>> {
   let mut transport = TransportConfig::default();
   transport.max_concurrent_bidi_streams(
@@ -58,6 +87,7 @@ pub fn transport_config(
   transport.send_window(config.send_window_bytes);
   transport.send_fairness(config.send_fairness);
   transport.datagram_receive_buffer_size(Some(config.datagram_receive_buffer_bytes));
+  transport.datagram_max_frame_size(datagram_frame_limit);
   transport.datagram_send_buffer_size(config.datagram_send_buffer_bytes);
   transport.enable_segmentation_offload(config.gso);
   transport.initial_mtu(config.initial_mtu);
@@ -104,10 +134,7 @@ pub fn apply_server_config(
   if let Some(key) = quic_host_key(config, host_key_base_dir)? {
     server_config.token_key(Arc::new(RetryTokenKey::new(key.token_key)));
   }
-  server_config.transport_config(transport_config(
-    &config.downstream.transport,
-    "quic.downstream.transport",
-  )?);
+  server_config.transport_config(downstream_transport_config(&config.downstream.transport)?);
   Ok(())
 }
 

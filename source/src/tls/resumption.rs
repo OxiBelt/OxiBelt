@@ -69,6 +69,7 @@ pub(super) struct TlsServerResumptionKey {
   pub(super) mode: TlsServerResumptionMode,
   pub(super) server_identity: String,
   pub(super) client_auth_identity: String,
+  pub(super) quic_datagram_frame_size: Option<u64>,
   pub(super) alpn_family: &'static str,
   pub(super) tls_provider: TlsCryptoProvider,
   pub(super) enable_secp256r1mlkem768: bool,
@@ -821,3 +822,6 @@ mod tests {
     assert_eq!(actual, expected);
   }
 }
+
+#[cfg(test)]
+mod datagram_tests;

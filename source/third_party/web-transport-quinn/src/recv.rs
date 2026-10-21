@@ -1,13 +1,14 @@
+use crate::error::CloseReason;
 use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     task::{ready, Context, Poll},
 };
 
-use bytes::Bytes;
 use crate::flow::SessionFlow;
+use bytes::Bytes;
 
 #[derive(Debug)]
 struct ReceiveFlow {
@@ -18,22 +19,25 @@ struct ReceiveFlow {
     complete: bool,
 }
 
+use crate::error::{decode_stream_code, encode_stream_code};
 use crate::{ReadError, ReadExactError, ReadToEndError, SessionError};
 
 /// A stream that can be used to recieve bytes. See [`quinn::RecvStream`].
 #[derive(Debug)]
 pub struct RecvStream {
     inner: quinn::RecvStream,
-    error: Arc<OnceLock<SessionError>>,
+    error: Arc<CloseReason>,
+    raw: bool,
     flow: Option<ReceiveFlow>,
     association_header_size: Option<u64>,
 }
 
 impl RecvStream {
-    pub(crate) fn new(stream: quinn::RecvStream, error: Arc<OnceLock<SessionError>>) -> Self {
+    pub(crate) fn new(stream: quinn::RecvStream, error: Arc<CloseReason>, raw: bool) -> Self {
         Self {
             inner: stream,
             error,
+            raw,
             flow: None,
             association_header_size: None,
         }
@@ -44,69 +48,118 @@ impl RecvStream {
         self
     }
 
-    pub(crate) fn set_flow(&mut self, flow: Arc<SessionFlow>, bidi: bool) -> Result<(), web_transport_proto::FlowError> {
-        let header_size = self.association_header_size.ok_or(web_transport_proto::FlowError::InvalidCapsule)?;
+    pub(crate) fn set_flow(
+        &mut self,
+        flow: Arc<SessionFlow>,
+        bidi: bool,
+    ) -> Result<(), web_transport_proto::FlowError> {
+        let header_size = self
+            .association_header_size
+            .ok_or(web_transport_proto::FlowError::InvalidCapsule)?;
         let mut incoming = flow.incoming.lock().unwrap();
-        let result = if bidi { incoming.open_bidi() } else { incoming.open_uni() };
+        let result = if bidi {
+            incoming.open_bidi()
+        } else {
+            incoming.open_uni()
+        };
         drop(incoming);
         result?;
-        self.flow = Some(ReceiveFlow { flow, header_size, body_seen: 0, bidi, complete: false });
+        self.flow = Some(ReceiveFlow {
+            flow,
+            header_size,
+            body_seen: 0,
+            bidi,
+            complete: false,
+        });
         Ok(())
     }
 
     fn account_read(&mut self, bytes: usize, completed: bool) -> io::Result<()> {
-        let Some(state) = self.flow.as_mut() else { return Ok(()); };
-        if state.complete { return Ok(()); }
+        let Some(state) = self.flow.as_mut() else {
+            return Ok(());
+        };
+        if state.complete {
+            return Ok(());
+        }
         if bytes > 0 {
-            state.body_seen = state.body_seen.checked_add(bytes as u64)
+            state.body_seen = state
+                .body_seen
+                .checked_add(bytes as u64)
                 .ok_or_else(|| io::Error::other("WebTransport body accounting overflow"))?;
             if let Err(err) = state.flow.consumed_data(bytes as u64) {
                 state.flow.fail();
-                return Err(io::Error::other(format!("WebTransport flow control: {err:?}")));
+                return Err(io::Error::other(format!(
+                    "WebTransport flow control: {err:?}"
+                )));
             }
         }
         if completed {
             state.complete = true;
             if let Err(err) = state.flow.finished_stream(state.bidi) {
                 state.flow.fail();
-                return Err(io::Error::other(format!("WebTransport flow control: {err:?}")));
+                return Err(io::Error::other(format!(
+                    "WebTransport flow control: {err:?}"
+                )));
             }
         }
         Ok(())
     }
 
     fn account_reset(&mut self) -> io::Result<()> {
-        let Some(info) = self.inner.reset_info() else { return Ok(()); };
-        let Some(state) = self.flow.as_mut() else { return Ok(()); };
-        if state.complete { return Ok(()); }
-        if let Err(err) = state.flow.reset_final_size(state.body_seen, info.final_size, state.header_size) {
+        let Some(info) = self.inner.reset_info() else {
+            return Ok(());
+        };
+        let Some(state) = self.flow.as_mut() else {
+            return Ok(());
+        };
+        if state.complete {
+            return Ok(());
+        }
+        if let Err(err) =
+            state
+                .flow
+                .reset_final_size(state.body_seen, info.final_size, state.header_size)
+        {
             state.flow.fail();
-            return Err(io::Error::other(format!("WebTransport reset final-size flow control: {err:?}")));
+            return Err(io::Error::other(format!(
+                "WebTransport reset final-size flow control: {err:?}"
+            )));
         }
         state.complete = true;
         if let Err(err) = state.flow.finished_stream(state.bidi) {
             state.flow.fail();
-            return Err(io::Error::other(format!("WebTransport flow control: {err:?}")));
+            return Err(io::Error::other(format!(
+                "WebTransport flow control: {err:?}"
+            )));
         }
         Ok(())
     }
 
     /// Replace connection-level errors with the stored session error if available.
-    fn map_error(&self, e: impl Into<ReadError>) -> ReadError {
-        let e = e.into();
+    fn map_error(&self, e: quinn::ReadError) -> ReadError {
+        let e = match e {
+            quinn::ReadError::Reset(code) => match decode_stream_code(code, self.raw) {
+                Some(code) => ReadError::Reset(code),
+                None => ReadError::InvalidReset(code),
+            },
+            e => e.into(),
+        };
         if let Some(err) = self.error.get() {
             if matches!(&e, ReadError::SessionError(_) | ReadError::InvalidReset(_)) {
                 return ReadError::SessionError(err.clone());
             }
         }
-        e
+        match e {
+            ReadError::SessionError(err) => ReadError::SessionError(self.error.map(err)),
+            err => err,
+        }
     }
 
     /// Tell the other end to stop sending data with the given error code. See [`quinn::RecvStream::stop`].
     /// This is a u32 with WebTransport since it shares the error space with HTTP/3.
+    /// A raw QUIC session sends the code as is.
     pub fn stop(&mut self, code: u32) -> Result<(), quinn::ClosedStream> {
-        let code = web_transport_proto::error_to_http3(code);
-        let code = quinn::VarInt::try_from(code).unwrap();
+        let code = encode_stream_code(code, self.raw);
         self.inner.stop(code)
     }
 
@@ -116,9 +169,27 @@ impl RecvStream {
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ReadError> {
         let result = self.inner.read(buf).await.map_err(|e| self.map_error(e));
         match &result {
-            Ok(Some(n)) => { if self.account_read(*n, false).is_err() { return Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())); } }
-            Ok(None) => { if self.account_read(0, true).is_err() { return Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())); } }
-            Err(_) => { if self.account_reset().is_err() { return Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())); } }
+            Ok(Some(n)) => {
+                if self.account_read(*n, false).is_err() {
+                    return Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    ));
+                }
+            }
+            Ok(None) => {
+                if self.account_read(0, true).is_err() {
+                    return Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    ));
+                }
+            }
+            Err(_) => {
+                if self.account_reset().is_err() {
+                    return Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    ));
+                }
+            }
         }
         result
     }
@@ -148,11 +219,33 @@ impl RecvStream {
         max_length: usize,
         ordered: bool,
     ) -> Result<Option<quinn::Chunk>, ReadError> {
-        let result = self.inner.read_chunk(max_length, ordered).await.map_err(|e| self.map_error(e));
+        let result = self
+            .inner
+            .read_chunk(max_length, ordered)
+            .await
+            .map_err(|e| self.map_error(e));
         match &result {
-            Ok(Some(chunk)) => { if self.account_read(chunk.bytes.len(), false).is_err() { return Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())); } }
-            Ok(None) => { if self.account_read(0, true).is_err() { return Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())); } }
-            Err(_) => { if self.account_reset().is_err() { return Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())); } }
+            Ok(Some(chunk)) => {
+                if self.account_read(chunk.bytes.len(), false).is_err() {
+                    return Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    ));
+                }
+            }
+            Ok(None) => {
+                if self.account_read(0, true).is_err() {
+                    return Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    ));
+                }
+            }
+            Err(_) => {
+                if self.account_reset().is_err() {
+                    return Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    ));
+                }
+            }
         }
         result
     }
@@ -160,13 +253,21 @@ impl RecvStream {
     /// Read chunks of data from the stream. See [`quinn::RecvStream::read_chunks`].
     pub async fn read_chunks(&mut self, bufs: &mut [Bytes]) -> Result<Option<usize>, ReadError> {
         if self.flow.is_some() {
-            if bufs.is_empty() { return Ok(Some(0)); }
+            if bufs.is_empty() {
+                return Ok(Some(0));
+            }
             match self.read_chunk(usize::MAX, true).await? {
-                Some(chunk) => { bufs[0] = chunk.bytes; Ok(Some(1)) }
+                Some(chunk) => {
+                    bufs[0] = chunk.bytes;
+                    Ok(Some(1))
+                }
                 None => Ok(None),
             }
         } else {
-            self.inner.read_chunks(bufs).await.map_err(|e| self.map_error(e))
+            self.inner
+                .read_chunks(bufs)
+                .await
+                .map_err(|e| self.map_error(e))
         }
     }
 
@@ -178,17 +279,26 @@ impl RecvStream {
             loop {
                 match self.read(&mut buf).await? {
                     Some(n) => {
-                        if out.len().checked_add(n).is_none_or(|length| length > size_limit) { return Err(ReadToEndError::TooLong); }
+                        if out
+                            .len()
+                            .checked_add(n)
+                            .is_none_or(|length| length > size_limit)
+                        {
+                            return Err(ReadToEndError::TooLong);
+                        }
                         out.extend_from_slice(&buf[..n]);
                     }
                     None => return Ok(out),
                 }
             }
         } else {
-            self.inner.read_to_end(size_limit).await.map_err(|e| match e {
-                quinn::ReadToEndError::Read(e) => self.map_error(e).into(),
-                e => e.into(),
-            })
+            self.inner
+                .read_to_end(size_limit)
+                .await
+                .map_err(|e| match e {
+                    quinn::ReadToEndError::Read(e) => self.map_error(e).into(),
+                    e => e.into(),
+                })
         }
     }
 
@@ -202,10 +312,10 @@ impl RecvStream {
                 if self.account_reset().is_err() {
                     return Err(quinn::ConnectionError::LocallyClosed.into());
                 }
-                Ok(web_transport_proto::error_from_http3(code.into_inner()))
+                Ok(decode_stream_code(code, self.raw))
             }
             Err(quinn::ResetError::ConnectionLost(conn_err)) => {
-                Err(self.error.get().cloned().unwrap_or_else(|| conn_err.into()))
+                Err(self.error.map(conn_err.into()))
             }
             Err(quinn::ResetError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
         }
@@ -237,7 +347,9 @@ impl tokio::io::AsyncRead for RecvStream {
         cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf,
     ) -> Poll<io::Result<()>> {
-        if buf.remaining() == 0 { return Poll::Ready(Ok(())); }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         let before = buf.filled().len();
         match Pin::new(&mut self.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
@@ -245,8 +357,11 @@ impl tokio::io::AsyncRead for RecvStream {
                 Poll::Ready(self.account_read(read, read == 0))
             }
             Poll::Ready(Err(error)) => {
-                if let Err(flow_error) = self.account_reset() { Poll::Ready(Err(flow_error)) }
-                else { Poll::Ready(Err(error)) }
+                if let Err(flow_error) = self.account_reset() {
+                    Poll::Ready(Err(flow_error))
+                } else {
+                    Poll::Ready(Err(error))
+                }
             }
             Poll::Pending => Poll::Pending,
         }
@@ -293,13 +408,17 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
             Ok(size) => size,
             Err(error) => {
                 if self.account_reset().is_err() {
-                    return Poll::Ready(Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())));
+                    return Poll::Ready(Err(ReadError::SessionError(
+                        quinn::ConnectionError::LocallyClosed.into(),
+                    )));
                 }
                 return Poll::Ready(Err(self.map_error(error)));
             }
         };
         if self.account_read(size, size == 0).is_err() {
-            return Poll::Ready(Err(ReadError::SessionError(quinn::ConnectionError::LocallyClosed.into())));
+            return Poll::Ready(Err(ReadError::SessionError(
+                quinn::ConnectionError::LocallyClosed.into(),
+            )));
         }
 
         // Quinn reports a finished stream as zero bytes into a non-empty buffer.

@@ -1416,6 +1416,43 @@ certificate trust inputs before rollout, and retain the previous complete
 immutable artifacts for rollback. These development changes do not amend the
 historical `0.9.2` release entry or establish a new supported release target.
 
+The YAML parser advances to `serde-saphyr` and `granit-parser` 2.0, retaining
+explicit deserialization and comment handling and the existing resource budgets.
+It corrects several edge cases in YAML deployment manifests: non-breaking
+spaces around `true` remain part of a string instead of producing a boolean;
+a keep-chomp block scalar ending in an unterminated indentation-only line no
+longer gains a spurious newline; and valid multiline double-quoted strings
+previously rejected are accepted and folded according to YAML rules. Check
+manifests that rely on these edge cases before rollout. The 57 repository YAML
+files checked during the refresh preserve their parsed values and acceptance;
+the native TOML configuration schema is unchanged.
+
+Unicode normalization advances from Unicode 17 to Unicode 18. WAF text
+normalization uses the updated NFC tables, which can change string matching
+for newly assigned combining characters. For example, NFC of `U+0061 U+05C8
+U+0301` now produces `U+00E1 U+05C8` instead of retaining the original sequence.
+Review rules and representative inputs involving these characters before
+rollout; rule syntax and normalization configuration are unchanged.
+
+Custom JSONPath regular-expression filters in kubeconfig authentication now
+group `match` alternations before anchoring and exclude carriage returns from
+`.` matches in `match` and `search`. Standard token and expiry field extraction
+is unchanged. Review custom filters that depend on those edge cases before
+rollout.
+
+HTTP/3 endpoints now advertise a complete QUIC DATAGRAM frame limit of at
+most `1144` bytes, independently of configured receive-queue memory. The
+WebTransport application payload is smaller by its frame and session headers;
+clients must use the negotiated capacity. Before accepting a downstream
+HTTP/3 WebTransport session, OxiBelt checks that the opened upstream can carry
+the corresponding payload and has enough initial send-queue capacity. An
+incompatible upstream causes a `502` response before downstream session
+acceptance. HTTP/2 capsule ingress keeps its separate capacity contract. Existing
+WAF and per-send size checks continue to apply. Resumption contexts include this
+frame limit, so tickets from an incompatible limit cannot authorize early data;
+clients can complete a fresh handshake. Review datagram sizes before rollout or
+rollback; no configuration or persisted-state migration is required.
+
 Rust Docker image builds now use `CARGO_NET_RETRY=10`, matching the host CI
 budget for transient Cargo download failures. Persistent download failures and
 compiler errors still stop the build. This build-only change requires no

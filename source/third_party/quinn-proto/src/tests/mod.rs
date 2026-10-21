@@ -4411,3 +4411,55 @@ fn preferred_address() {
     let mut pair = Pair::new(Arc::new(EndpointConfig::default()), server_config);
     pair.connect();
 }
+
+#[test]
+fn datagram_wire_cap_is_independent_of_large_queue_and_path_mtu() {
+    for mtu in [1200, 1452] {
+        let mut transport = TransportConfig::default();
+        transport.datagram_receive_buffer_size(Some(1 << 20));
+        transport.datagram_max_frame_size(Some(VarInt::from_u32(1144)));
+        let server = ServerConfig {
+            transport: Arc::new(transport),
+            ..server_config()
+        };
+        let mut pair = Pair::new(Default::default(), server);
+        let mut client = client_config();
+        let mut transport = TransportConfig::default();
+        transport
+            .initial_mtu(mtu)
+            .min_mtu(1200)
+            .mtu_discovery_config(None);
+        client.transport_config(Arc::new(transport));
+        let (client_ch, server_ch) = pair.connect_with(client);
+        let max = pair.client_datagrams(client_ch).max_size().unwrap();
+        assert_eq!(max, 1144 - Datagram::SIZE_BOUND);
+        pair.client_datagrams(client_ch)
+            .send(Bytes::from(vec![42; max]), true)
+            .unwrap();
+        pair.drive();
+        assert_eq!(pair.server_datagrams(server_ch).recv().unwrap().len(), max);
+    }
+}
+
+#[test]
+fn forwarding_payload_survives_path_fallback_with_maximum_connection_id() {
+    let mut endpoint = EndpointConfig::default();
+    endpoint.cid_generator(|| Box::new(RandomConnectionIdGenerator::new(MAX_CID_SIZE)));
+    let mut pair = Pair::new(Arc::new(endpoint), server_config());
+    let mut client = client_config();
+    let mut transport = TransportConfig::default();
+    transport.initial_mtu(1200).min_mtu(1200);
+    client.transport_config(Arc::new(transport));
+    let (client_ch, server_ch) = pair.connect_with(client);
+    assert!(pair.client_datagrams(client_ch).max_size().unwrap() > 1150);
+    pair.mtu = 1200;
+    let now = pair.time;
+    pair.client_conn_mut(client_ch).path_changed(now);
+    // Largest accepted downstream application payload (1142), followed by
+    // an eight-byte upstream WebTransport association ID, fits after fallback.
+    assert_eq!(pair.client_datagrams(client_ch).max_size(), Some(1150));
+    let data = Bytes::from(vec![42; 1150]);
+    pair.client_datagrams(client_ch).send(data.clone(), false).unwrap();
+    pair.drive();
+    assert_eq!(pair.server_datagrams(server_ch).recv(), Some(data));
+}

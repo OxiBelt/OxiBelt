@@ -232,6 +232,21 @@ impl UpstreamWebTransportSession {
     }
   }
 
+  /// Called only before this dedicated upstream session's first application send.
+  // The connector gives this session a dedicated upstream connection. Before
+  // accepting the downstream CONNECT no application datagrams have been queued,
+  // so free space also bounds the configured send queue, including bookkeeping.
+  // Revisit this admission check if upstream WebTransport connections are pooled.
+  pub(crate) fn datagram_capacity_before_accept(&self) -> usize {
+    match self {
+      Self::H3(session) => session
+        .inner
+        .max_datagram_size()
+        .min(session.inner.datagram_send_buffer_space()),
+      Self::H2(_) => MAX_WEBTRANSPORT_DATAGRAM_BYTES,
+    }
+  }
+
   pub(crate) fn send_datagram(&self, payload: Bytes) -> anyhow::Result<()> {
     match self {
       Self::H3(session) => session.send_datagram(payload),
@@ -444,9 +459,12 @@ impl H3WebTransportSession {
   }
 
   fn send_datagram(&self, payload: Bytes) -> anyhow::Result<()> {
+    let max_datagram_size = self.inner.max_datagram_size();
     ensure!(
-      payload.len() <= self.inner.max_datagram_size(),
-      "upstream WebTransport datagram exceeds the negotiated payload limit"
+      payload.len() <= max_datagram_size,
+      "upstream WebTransport datagram exceeds the negotiated payload limit (payload {} bytes, maximum {} bytes)",
+      payload.len(),
+      max_datagram_size,
     );
     self
       .inner

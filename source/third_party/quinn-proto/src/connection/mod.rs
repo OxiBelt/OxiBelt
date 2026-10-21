@@ -1280,6 +1280,13 @@ impl Connection {
         }
     }
 
+    /// Complete incoming DATAGRAM frame limit for this connection's transport config.
+    ///
+    /// This remains bound to the connection when the endpoint configuration changes.
+    pub fn max_receive_datagram_frame_size(&self) -> Option<VarInt> {
+        self.config.get_datagram_max_frame_size()
+    }
+
     /// Control datagrams
     pub fn datagrams(&mut self) -> Datagrams<'_> {
         Datagrams { conn: self }
@@ -2779,7 +2786,7 @@ impl Connection {
                 Frame::Stream(f) => {
                     trace!(id = %f.id, offset = f.offset, len = f.data.len(), fin = f.fin, "got stream frame");
                 }
-                Frame::Datagram(f) => {
+                Frame::Datagram { datagram: f, .. } => {
                     trace!(len = f.data.len(), "got datagram frame");
                 }
                 f => {
@@ -2982,10 +2989,13 @@ impl Connection {
                     trace!("got new token");
                     token_store.insert(server_name, token);
                 }
-                Frame::Datagram(datagram) => {
+                Frame::Datagram {
+                    datagram,
+                    encoded_size,
+                } => {
                     if self
                         .datagrams
-                        .received(datagram, &self.config.datagram_receive_buffer_size)?
+                        .received(datagram, encoded_size, &self.config)?
                     {
                         self.events.push_back(Event::DatagramReceived);
                     }

@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
-use web_transport_proto::{Capsule, FlowCredit, FlowError, WT_MAX_DATA, WT_MAX_STREAMS_BIDI, WT_MAX_STREAMS_UNI};
+use web_transport_proto::{
+    Capsule, FlowCredit, FlowError, WT_MAX_DATA, WT_MAX_STREAMS_BIDI, WT_MAX_STREAMS_UNI,
+};
 
 pub(crate) struct SessionFlow {
     conn: quinn::Connection,
@@ -15,7 +17,9 @@ pub(crate) struct SessionFlow {
 
 impl std::fmt::Debug for SessionFlow {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("SessionFlow").finish_non_exhaustive()
+        formatter
+            .debug_struct("SessionFlow")
+            .finish_non_exhaustive()
     }
 }
 
@@ -33,12 +37,17 @@ impl SessionFlow {
     }
 
     pub fn fail(&self) {
-        self.conn.close(quinn::VarInt::try_from(web_transport_proto::WT_FLOW_CONTROL_ERROR).unwrap(), b"WebTransport flow control error");
+        self.conn.close(
+            quinn::VarInt::try_from(web_transport_proto::WT_FLOW_CONTROL_ERROR).unwrap(),
+            b"WebTransport flow control error",
+        );
     }
 
     pub fn grant_initial(&self, uni: u64, bidi: u64, data: u64) -> Result<(), FlowError> {
-        if uni > web_transport_proto::MAX_STREAMS || bidi > web_transport_proto::MAX_STREAMS
-            || data > web_transport_proto::VarInt::MAX.into_inner() {
+        if uni > web_transport_proto::MAX_STREAMS
+            || bidi > web_transport_proto::MAX_STREAMS
+            || data > web_transport_proto::VarInt::MAX.into_inner()
+        {
             return Err(FlowError::Exceeded);
         }
         *self.desired.lock().unwrap() = (uni, bidi, data);
@@ -64,7 +73,9 @@ impl SessionFlow {
 
     fn wake_outgoing(&self) {
         let wakers = std::mem::take(&mut *self.outgoing_wakers.lock().unwrap());
-        for waker in wakers { waker.wake(); }
+        for waker in wakers {
+            waker.wake();
+        }
     }
 
     pub async fn open(&self, bidi: bool) -> Result<(), FlowError> {
@@ -74,7 +85,11 @@ impl SessionFlow {
             notified.as_mut().enable();
             let result = {
                 let mut outgoing = self.outgoing.lock().unwrap();
-                if bidi { outgoing.open_bidi() } else { outgoing.open_uni() }
+                if bidi {
+                    outgoing.open_bidi()
+                } else {
+                    outgoing.open_uni()
+                }
             };
             match result {
                 Ok(()) => return Ok(()),
@@ -88,13 +103,25 @@ impl SessionFlow {
         let incoming = self.incoming.lock().unwrap();
         let desired = self.desired.lock().unwrap();
         if desired.0 > incoming.max_uni {
-            return Some((WT_MAX_STREAMS_UNI, desired.0, FlowCredit::credit_capsule(WT_MAX_STREAMS_UNI, desired.0).ok()?));
+            return Some((
+                WT_MAX_STREAMS_UNI,
+                desired.0,
+                FlowCredit::credit_capsule(WT_MAX_STREAMS_UNI, desired.0).ok()?,
+            ));
         }
         if desired.1 > incoming.max_bidi {
-            return Some((WT_MAX_STREAMS_BIDI, desired.1, FlowCredit::credit_capsule(WT_MAX_STREAMS_BIDI, desired.1).ok()?));
+            return Some((
+                WT_MAX_STREAMS_BIDI,
+                desired.1,
+                FlowCredit::credit_capsule(WT_MAX_STREAMS_BIDI, desired.1).ok()?,
+            ));
         }
         if desired.2 > incoming.max_data {
-            return Some((WT_MAX_DATA, desired.2, FlowCredit::credit_capsule(WT_MAX_DATA, desired.2).ok()?));
+            return Some((
+                WT_MAX_DATA,
+                desired.2,
+                FlowCredit::credit_capsule(WT_MAX_DATA, desired.2).ok()?,
+            ));
         }
         None
     }
@@ -113,7 +140,9 @@ impl SessionFlow {
         let mut incoming = self.incoming.lock().unwrap();
         incoming.use_data(n)?;
         let mut desired = self.desired.lock().unwrap();
-        desired.2 = desired.2.checked_add(n)
+        desired.2 = desired
+            .2
+            .checked_add(n)
             .filter(|value| *value <= web_transport_proto::VarInt::MAX.into_inner())
             .ok_or(FlowError::Exceeded)?;
         drop(incoming);
@@ -121,14 +150,22 @@ impl SessionFlow {
         Ok(())
     }
 
-    pub fn reset_final_size(&self, body_seen: u64, final_size: u64, header_size: u64) -> Result<(), FlowError> {
-        let discarded = final_size.checked_sub(header_size)
+    pub fn reset_final_size(
+        &self,
+        body_seen: u64,
+        final_size: u64,
+        header_size: u64,
+    ) -> Result<(), FlowError> {
+        let discarded = final_size
+            .checked_sub(header_size)
             .and_then(|body| body.checked_sub(body_seen))
             .ok_or(FlowError::InvalidCapsule)?;
         let mut incoming = self.incoming.lock().unwrap();
         incoming.reset_final_size(body_seen, final_size, header_size)?;
         let mut desired = self.desired.lock().unwrap();
-        desired.2 = desired.2.checked_add(discarded)
+        desired.2 = desired
+            .2
+            .checked_add(discarded)
             .filter(|value| *value <= web_transport_proto::VarInt::MAX.into_inner())
             .ok_or(FlowError::Exceeded)?;
         drop(incoming);
@@ -139,7 +176,9 @@ impl SessionFlow {
     pub fn finished_stream(&self, bidi: bool) -> Result<(), FlowError> {
         let mut desired = self.desired.lock().unwrap();
         let limit = if bidi { &mut desired.1 } else { &mut desired.0 };
-        *limit = limit.checked_add(1).filter(|v| *v <= web_transport_proto::MAX_STREAMS)
+        *limit = limit
+            .checked_add(1)
+            .filter(|v| *v <= web_transport_proto::MAX_STREAMS)
             .ok_or(FlowError::Exceeded)?;
         drop(desired);
         self.incoming_notify.notify_one();

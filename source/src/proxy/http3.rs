@@ -273,6 +273,11 @@ pub(crate) async fn handle_downstream_connection(
     .then(|| downstream_quic_forwarded_client_certificate(&connection))
     .flatten();
   let early_data = crate::quic::h3::EarlyDataTracker::default();
+  // Read the actual immutable connection setting, rather than a possibly newer
+  // AppSnapshot selected while an Initial was pending during endpoint reload.
+  let datagram_frame_limit = connection
+    .max_receive_datagram_frame_size()
+    .map_or(0, |limit| limit.into_inner() as usize);
   let downstream_connection = connection.clone();
   let quic_connection = crate::quic::h3::Connection::new(connection, early_data.clone());
   let mut request_admission = request_tasks::RequestAdmission::new(&snapshot.config);
@@ -497,6 +502,7 @@ pub(crate) async fn handle_downstream_connection(
       webtransport_bridge::serve_webtransport_connection(
         h3_connection,
         wire_draft,
+        datagram_frame_limit,
         request,
         stream,
         peer_addr,

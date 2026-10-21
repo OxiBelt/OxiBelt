@@ -47,6 +47,7 @@ pub struct TransportConfig {
     pub(crate) crypto_buffer_size: usize,
     pub(crate) allow_spin: bool,
     pub(crate) datagram_receive_buffer_size: Option<usize>,
+    pub(crate) datagram_max_frame_size: Option<VarInt>,
     pub(crate) datagram_send_buffer_size: usize,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
@@ -296,6 +297,33 @@ impl TransportConfig {
         self
     }
 
+    /// Cap the complete incoming DATAGRAM frame, including its encoded header.
+    ///
+    /// `None` preserves the limit derived from the receive buffer (at most 65535).
+    /// This does not enlarge the aggregate receive buffer or enable disabled datagrams.
+    /// The effective cap also leaves room for one queued datagram's bookkeeping.
+    /// Lowering this limit requires a distinct resumption context when accepting 0-RTT.
+    pub fn datagram_max_frame_size(&mut self, value: Option<VarInt>) -> &mut Self {
+        self.datagram_max_frame_size = value;
+        self
+    }
+
+    /// Complete frame limit advertised to the peer, or `None` when disabled.
+    pub fn get_datagram_max_frame_size(&self) -> Option<VarInt> {
+        let buffer = self.datagram_receive_buffer_size?;
+        let legacy = buffer.min(u16::MAX as usize) as u64;
+        let limit = match self.datagram_max_frame_size {
+            None => legacy,
+            Some(limit) => {
+                // A lengthless frame has a one-byte type. Its entire remaining
+                // contents may need buffering, plus the existing queue metadata.
+                let payload = buffer.checked_sub(size_of::<crate::frame::Datagram>())?;
+                limit.into_inner().min(legacy).min(payload.saturating_add(1) as u64)
+            }
+        };
+        Some(VarInt::from_u64(limit).expect("frame limit is bounded by u16::MAX"))
+    }
+
     /// Maximum number of outgoing application datagram bytes to buffer
     ///
     /// While datagrams are sent ASAP, it is possible for an application to generate data faster
@@ -393,6 +421,7 @@ impl Default for TransportConfig {
             crypto_buffer_size: 16 * 1024,
             allow_spin: true,
             datagram_receive_buffer_size: Some(STREAM_RWND as usize),
+            datagram_max_frame_size: None,
             datagram_send_buffer_size: 1024 * 1024,
             #[cfg(test)]
             deterministic_packet_numbers: false,
@@ -429,6 +458,7 @@ impl fmt::Debug for TransportConfig {
             crypto_buffer_size,
             allow_spin,
             datagram_receive_buffer_size,
+            datagram_max_frame_size,
             datagram_send_buffer_size,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
@@ -461,6 +491,7 @@ impl fmt::Debug for TransportConfig {
             .field("crypto_buffer_size", crypto_buffer_size)
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
+            .field("datagram_max_frame_size", datagram_max_frame_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);

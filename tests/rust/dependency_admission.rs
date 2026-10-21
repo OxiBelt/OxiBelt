@@ -349,6 +349,42 @@ fn compatibility_lines_follow_cargo_zero_major_semantics() {
 }
 
 #[test]
+fn bindgen_and_prettyplease_share_the_same_syn_ast() {
+  let lock = toml_document("Cargo.lock");
+  let packages = lock["package"].as_array().expect("Cargo packages");
+  let dependency = |package: &toml::Value, prefix: &str| {
+    package["dependencies"]
+      .as_array()
+      .expect("package dependencies")
+      .iter()
+      .filter_map(toml::Value::as_str)
+      .find(|edge| edge.starts_with(prefix))
+      .expect("version-qualified dependency edge")
+      .to_owned()
+  };
+
+  for generator in packages
+    .iter()
+    .filter(|package| package["name"].as_str() == Some("bindgen"))
+  {
+    let formatter_edge = dependency(generator, "prettyplease ");
+    let (_, formatter_version) = formatter_edge.split_once(' ').unwrap();
+    let formatter = packages
+      .iter()
+      .find(|package| {
+        package["name"].as_str() == Some("prettyplease")
+          && package["version"].as_str() == Some(formatter_version)
+      })
+      .expect("locked formatter");
+    assert_eq!(
+      dependency(generator, "syn "),
+      dependency(formatter, "syn "),
+      "Bindgen and its formatter must exchange the same Syn AST type",
+    );
+  }
+}
+
+#[test]
 fn aws_lc_stable_signature_evidence_matches_first_party_features() {
   let core = toml_document("source/Cargo.toml");
   assert_eq!(
@@ -691,7 +727,7 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
               ("quinn", "0.11.12")
                 | ("quinn-proto", "0.11.19")
                 | ("h3", "0.0.8")
-                | ("web-transport-quinn", "0.12.1")
+                | ("web-transport-quinn", "0.13.3")
                 | ("web-transport-proto", "0.6.2")
             ),
           "critical dependency {name}@{version} is not an approved registry or byte-locked vendored package"
@@ -1220,7 +1256,7 @@ fn webtransport_h3_transport_sources_are_byte_locked_and_governed() {
     ("quinn", "0.11.12"),
     ("quinn-proto", "0.11.19"),
     ("h3", "0.0.8"),
-    ("web-transport-quinn", "0.12.1"),
+    ("web-transport-quinn", "0.13.3"),
     ("web-transport-proto", "0.6.2"),
   ] {
     let vendor = format!("source/third_party/{name}");
@@ -1325,7 +1361,7 @@ fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
     vec!["dep:cc"]
   );
   let cc = &allocator["build-dependencies"]["cc"];
-  assert_eq!(cc["version"].as_str(), Some("=1.4.7"));
+  assert_eq!(cc["version"].as_str(), Some("=1.9.0"));
   assert_eq!(cc["optional"].as_bool(), Some(true));
   assert!(
     runtime["dependencies"].get("oxibelt-allocator").is_none(),
