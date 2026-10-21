@@ -6,6 +6,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 run_id="wt-wpt-$(date +%s)-$$"
 runner="${run_id}-runner"
+initial_direct_runner="${run_id}-initial-direct"
 proxy="${run_id}-proxy"
 direct_retry_runner="${run_id}-direct-retry"
 wpt_image="${OXIBELT_WEBTRANSPORT_WPT_IMAGE:-oxibelt/webtransport-wpt:ece2d7fdc436-chrome155-firefox158-prefs156}"
@@ -27,7 +28,7 @@ cleanup() {
   if docker container inspect "${proxy}" >/dev/null 2>&1; then
     docker logs "${proxy}" >"${artifact_dir}/proxy.log" 2>&1 || true
   fi
-  docker rm -fv "${proxy}" "${runner}" "${direct_retry_runner}" >/dev/null 2>&1 || true
+  docker rm -fv "${proxy}" "${runner}" "${initial_direct_runner}" "${direct_retry_runner}" >/dev/null 2>&1 || true
   if [[ "${created_wpt_image}" == true ]]; then
     docker image rm "${wpt_image}" >/dev/null 2>&1 || true
   fi
@@ -46,24 +47,33 @@ if ! docker image inspect "${wpt_image}" >/dev/null 2>&1; then
   created_wpt_image=true
 fi
 
-docker create \
-  --name "${runner}" \
-  --label "oxibelt.test.run=${run_id}" \
-  --cap-add NET_ADMIN \
-  --security-opt no-new-privileges \
-  --shm-size 1g \
-  --mount "type=bind,src=${artifact_dir},dst=/artifacts" \
-  "${wpt_image}" >/dev/null
-docker start "${runner}" >/dev/null
+create_runner() {
+  local name="$1"
+  docker create \
+    --name "${name}" \
+    --label "oxibelt.test.run=${run_id}" \
+    --cap-add NET_ADMIN \
+    --security-opt no-new-privileges \
+    --shm-size 1g \
+    --mount "type=bind,src=${artifact_dir},dst=/artifacts" \
+    "${wpt_image}" >/dev/null
+  docker start "${name}" >/dev/null
+}
 
-docker exec "${runner}" /bin/sh -c \
-  'test "$(cat /opt/wpt/.source-revision)" = "ece2d7fdc436d4b9a3856877163b07ec15c05354"'
-docker exec "${runner}" /opt/chrome/chrome --version \
-  | grep --fixed-strings -- 'Google Chrome for Testing 155.0.8059.84'
-docker exec "${runner}" /opt/firefox/firefox --version \
-  | grep --fixed-strings -- 'Mozilla Firefox 158.0.1'
-docker exec "${runner}" /bin/sh -c \
-  'cd /opt/wpt/firefox-profiles && sha256sum --check --strict /opt/wpt/firefox-profiles.sha256'
+verify_runner() {
+  local name="$1"
+  docker exec "${name}" /bin/sh -c \
+    'test "$(cat /opt/wpt/.source-revision)" = "ece2d7fdc436d4b9a3856877163b07ec15c05354"'
+  docker exec "${name}" /opt/chrome/chrome --version \
+    | grep --fixed-strings -- 'Google Chrome for Testing 155.0.8059.84'
+  docker exec "${name}" /opt/firefox/firefox --version \
+    | grep --fixed-strings -- 'Mozilla Firefox 158.0.1'
+  docker exec "${name}" /bin/sh -c \
+    'cd /opt/wpt/firefox-profiles && sha256sum --check --strict /opt/wpt/firefox-profiles.sha256'
+}
+
+create_runner "${initial_direct_runner}"
+verify_runner "${initial_direct_runner}"
 
 run_wpt() {
   local browser="$1"
@@ -118,8 +128,14 @@ run_wpt() {
 }
 
 for browser in chrome firefox; do
-  run_wpt "${browser}" direct
+  run_wpt "${browser}" direct "${browser}-direct" "${initial_direct_runner}"
 done
+
+# Keep direct and proxied conntrack histories in separate network namespaces.
+# The proxied namespace contains only flows created with its DNAT rules active.
+docker rm -fv "${initial_direct_runner}" >/dev/null
+create_runner "${runner}"
+verify_runner "${runner}"
 
 docker cp "${runner}:/opt/wpt/tools/certs/cacert.pem" "${work_dir}/cacert.pem"
 docker cp "${runner}:/opt/wpt/tools/certs/web-platform.test.pem" "${work_dir}/server.pem"
@@ -169,7 +185,7 @@ max_webtransport_sessions_per_ip = 8192
 max_webtransport_sessions_per_connection = 256
 [[upstreams]]
 name = "wpt-h3"
-origin = "https://127.0.0.1:11000"
+origin = "https://127.0.0.3:11000"
 max_http_version = "h3"
 webtransport = true
 preserve_host = true
@@ -209,9 +225,11 @@ if [[ "$(docker inspect --format '{{.State.Running}}' "${proxy}")" != true ]]; t
 fi
 
 # WPT deliberately resolves browser test domains to 127.0.0.1. The upstream
-# server remains at 127.0.0.1:11000. Only packets from the browser/WPT user
-# to the WebTransport UDP port are redirected to the proxy at 127.0.0.2.
-# OxiBelt runs as UID 10001, so its upstream packets are never redirected.
+# server remains at 127.0.0.1:11000. Browser/WPT packets are redirected to the
+# proxy at 127.0.0.2. Give upstream flows a distinct original destination:
+# conntrack reuses a UDP tuple's NAT mapping even after its socket closes and
+# another UID reuses the port, before consulting the owner rule again.
+# Only OxiBelt's virtual origin at 127.0.0.3 is translated to the real server.
 proxy_nat_chain=OXIWPT
 docker exec --user root "${runner}" /usr/sbin/iptables -t nat -N "${proxy_nat_chain}"
 docker exec --user root "${runner}" \
@@ -223,8 +241,18 @@ docker exec --user root "${runner}" \
     -m owner --uid-owner 10002 \
     -d 127.0.0.1/32 -p udp --dport 11000 \
     -j "${proxy_nat_chain}"
+docker exec --user root "${runner}" \
+  /usr/sbin/iptables -t nat -A OUTPUT \
+    -m owner --uid-owner 10001 \
+    -d 127.0.0.3/32 -p udp --dport 11000 \
+    -j DNAT --to-destination 127.0.0.1:11000
 
 proxy_nat_packets() {
+  docker exec --user root "${runner}" \
+    /usr/sbin/iptables -t nat -C OUTPUT \
+      -m owner --uid-owner 10001 \
+      -d 127.0.0.3/32 -p udp --dport 11000 \
+      -j DNAT --to-destination 127.0.0.1:11000 || return 1
   docker exec --user root "${runner}" \
     /usr/sbin/iptables -t nat -C OUTPUT \
       -m owner --uid-owner 10002 \

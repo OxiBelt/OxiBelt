@@ -460,12 +460,15 @@ import hashlib
 import json
 import os
 import sys
+import tomllib
 from pathlib import Path
 
 args = sys.argv[1:]
 root = Path(os.environ["FAKE_WPT_ROOT"])
 state = json.loads((root / "state.json").read_text())
 scenario = os.environ["FAKE_WPT_SCENARIO"]
+with (root / "commands.jsonl").open("a") as trace:
+    trace.write(json.dumps(args) + "\n")
 if args[0] == "create":
     name = args[args.index("--name") + 1]
     network = args[args.index("--network") + 1] if "--network" in args else None
@@ -517,6 +520,7 @@ elif args[0] == "exec" and "./wpt" in args:
     firefox_retry = report_name == "firefox-proxied-retry"
     if "proxied" in report_name and not (
         (retry and scenario == "missing-packets") or (firefox_retry and scenario == "firefox-missing-packets")
+        or (report_name == "chrome-proxied" and scenario == "initial-missing-packets")
     ):
         state["packets"] += 1
     (root / "state.json").write_text(json.dumps(state))
@@ -560,7 +564,7 @@ elif args[0] == "exec" and "./wpt" in args:
     }
     (root / "state.json").write_text(json.dumps(state))
     print(f"synthetic WPT {report_name}")
-    sys.exit(7 if (retry and scenario == "run-fails") or (direct_retry and scenario == "direct-run-fails") or (firefox_retry and scenario == "firefox-run-fails") else 0)
+    sys.exit(7 if (retry and scenario == "run-fails") or (direct_retry and scenario == "direct-run-fails") or (firefox_retry and scenario == "firefox-run-fails") or (report_name == "chrome-direct" and scenario == "initial-direct-run-fails") else 0)
 elif args[0] == "exec" and "--version" in args:
     print("Google Chrome for Testing 155.0.8059.84" if "/opt/chrome/chrome" in args else "Mozilla Firefox 158.0.1")
 elif args[0] == "exec" and "/usr/sbin/iptables" in args:
@@ -577,6 +581,8 @@ elif args[0] == "cp":
         config = Path(args[-2]).read_text()
         assert '[logging]\nlevel = "info,oxibelt::proxy::http3::webtransport_connect=debug"' in config
         assert "webtransport_only_connections = true" in config
+        state["proxy_config"] = tomllib.loads(config)
+        (root / "state.json").write_text(json.dumps(state))
 elif args[0] == "inspect":
     print("true")
 elif args[0] == "logs":
@@ -642,13 +648,100 @@ class ReplayShellTestCase(unittest.TestCase):
                     self.assertIn(name, Path(f"{network_log}.0").read_text(), completed.stderr)
             else:
                 self.assertFalse(list((root / "artifacts").glob(f"{name}-moz*")))
-        original = json.loads((root / "artifacts" / "chrome-proxied.json").read_text())
-        target = next(entry for entry in original["results"] if entry["test"] == SERVICE_WORKER)
-        if scenario == "serviceworker-timeout":
-            self.assertEqual(original, timeout_report)
-        elif not scenario.startswith(("firefox-", "direct-")):
-            self.assertEqual(target["subtests"][0]["status"], "FAIL")
+        if "chrome-proxied" in state["runs"]:
+            original = json.loads((root / "artifacts" / "chrome-proxied.json").read_text())
+            target = next(entry for entry in original["results"] if entry["test"] == SERVICE_WORKER)
+            if scenario == "serviceworker-timeout":
+                self.assertEqual(original, timeout_report)
+            elif not scenario.startswith(("firefox-", "direct-")):
+                self.assertEqual(target["subtests"][0]["status"], "FAIL")
         return completed, state, root
+
+
+class RunnerNamespaceShellTests(ReplayShellTestCase):
+    def test_direct_and_proxied_passes_use_distinct_conntrack_namespaces(self):
+        completed, state, root = self.run_gate("firefox-normal", expected_retries=0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        invocations = {item["report"]: item for item in state["invocations"]}
+        direct = invocations["chrome-direct"]["container"]
+        proxied = invocations["chrome-proxied"]["container"]
+        self.assertEqual(invocations["firefox-direct"]["container"], direct)
+        self.assertEqual(invocations["firefox-proxied"]["container"], proxied)
+        self.assertNotEqual(direct, proxied)
+        creates = {item["container"]: item for item in state["creates"]}
+        self.assertIsNone(creates[direct]["network"])
+        self.assertIsNone(creates[proxied]["network"])
+        proxy = next(name for name in creates if name not in (direct, proxied))
+        self.assertEqual(creates[proxy]["network"], f"container:{proxied}")
+        commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        removed = next(i for i, args in enumerate(commands) if args[0] == "rm" and direct in args)
+        proxy_runner_created = next(i for i, args in enumerate(commands) if args[0] == "create" and proxied in args)
+        first_nat = next(i for i, args in enumerate(commands) if "/usr/sbin/iptables" in args)
+        direct_runs = [i for i, args in enumerate(commands) if "./wpt" in args and direct == args[args.index("./wpt") - 1]]
+        self.assertEqual(len(direct_runs), 2)
+        self.assertLess(max(direct_runs), removed)
+        self.assertLess(removed, proxy_runner_created)
+        self.assertLess(proxy_runner_created, first_nat)
+        self.assertEqual(set(state["nat_containers"]), {proxied})
+        self.assertFalse(any("conntrack" in argument for args in commands for argument in args))
+
+    def test_upstream_alias_partitions_nat_tuples_and_browser_counter(self):
+        completed, state, root = self.run_gate("firefox-normal", expected_retries=0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        commands = [json.loads(line) for line in (root / "commands.jsonl").read_text().splitlines()]
+        nat = [(i, args) for i, args in enumerate(commands) if "/usr/sbin/iptables" in args]
+
+        def value(args, option):
+            return args[args.index(option) + 1] if option in args else None
+
+        def matches(args, action, chain, owner, destination, target, translated=None):
+            return (value(args, "-t") == "nat" and value(args, action) == chain
+                    and value(args, "--uid-owner") == owner and value(args, "-d") == destination
+                    and value(args, "-p") == "udp" and value(args, "--dport") == "11000"
+                    and value(args, "-j") == target and value(args, "--to-destination") == translated)
+
+        upstream = [(i, args) for i, args in nat if matches(
+            args, "-A", "OUTPUT", "10001", "127.0.0.3/32", "DNAT", "127.0.0.1:11000")]
+        browser = [(i, args) for i, args in nat if matches(
+            args, "-A", "OUTPUT", "10002", "127.0.0.1/32", "OXIWPT")]
+        browser_dnat = [(i, args) for i, args in nat if matches(
+            args, "-A", "OXIWPT", None, "127.0.0.1/32", "DNAT", "127.0.0.2:11000")]
+        self.assertEqual(len(upstream), 1)
+        self.assertEqual(len(browser), 1)
+        self.assertEqual(len(browser_dnat), 1)
+        self.assertEqual([args for _, args in nat if value(args, "-A") == "OXIWPT"], [browser_dnat[0][1]])
+        self.assertTrue(any(matches(args, "-C", "OUTPUT", "10001", "127.0.0.3/32", "DNAT", "127.0.0.1:11000") for _, args in nat))
+        self.assertTrue(any(matches(args, "-C", "OUTPUT", "10002", "127.0.0.1/32", "OXIWPT") for _, args in nat))
+        counters = [args for _, args in nat if "-L" in args]
+        self.assertTrue(counters)
+        self.assertTrue(all(value(args, "-L") == "OXIWPT" for args in counters))
+        first_proxy_run = next(i for i, args in enumerate(commands)
+                               if any(arg == "--log-wptreport=/artifacts/chrome-proxied.json" for arg in args))
+        self.assertLess(max(upstream[0][0], browser[0][0], browser_dnat[0][0]), first_proxy_run)
+        config = state["proxy_config"]
+        self.assertEqual(config["listeners"]["https_bind"], "127.0.0.2:11000")
+        upstream_config = config["upstreams"][0]
+        self.assertEqual(upstream_config["origin"], "https://127.0.0.3:11000")
+        self.assertTrue(upstream_config["preserve_host"])
+        self.assertEqual(upstream_config["tls"]["server_name"], "web-platform.test")
+        self.assertEqual(upstream_config["tls"]["trust"], "exclusive")
+        self.assertEqual(upstream_config["tls"]["trusted_ca_certs"], ["cacert.pem"])
+        self.assertEqual(config["routes"][0]["hosts"], ["web-platform.test", "not-web-platform.test"])
+
+    def test_failed_initial_direct_run_stops_before_proxy_namespace_or_nat(self):
+        completed, state, root = self.run_gate("initial-direct-run-fails", expected_retries=0)
+        self.assertEqual(completed.returncode, 7, completed.stderr)
+        self.assertEqual(state["runs"], ["chrome-direct"])
+        self.assertEqual(len(state["creates"]), 1)
+        self.assertEqual((root / "artifacts/chrome-direct.exit").read_text().strip(), "7")
+        self.assertFalse(state.get("nat_containers"))
+
+    def test_initial_proxy_without_browser_traversal_fails_before_replay(self):
+        completed, state, _ = self.run_gate("initial-missing-packets", expected_retries=0)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertEqual(state["runs"], ["chrome-direct", "firefox-direct", "chrome-proxied"])
+        self.assertEqual(state["packets"], 0)
+        self.assertIn("chrome: no browser WebTransport packets reached the proxy DNAT rule.", completed.stderr)
 
 
 class ProxyReplayShellTests(ReplayShellTestCase):
@@ -768,16 +861,17 @@ class DirectReplayShellTests(ReplayShellTestCase):
         initial_runner = invocations["chrome-direct"]["container"]
         retry_runner = invocations["chrome-direct-retry"]["container"]
         self.assertNotEqual(retry_runner, initial_runner)
-        self.assertEqual(invocations["chrome-proxied"]["container"], initial_runner)
+        proxied_runner = invocations["chrome-proxied"]["container"]
+        self.assertEqual(len({initial_runner, proxied_runner, retry_runner}), 3)
         creates = {creation["container"]: creation for creation in state["creates"]}
-        self.assertEqual(len(creates), 3)
-        self.assertIsNone(creates[initial_runner]["network"])
-        self.assertIsNone(creates[retry_runner]["network"])
-        proxy = next(name for name in creates if name not in (initial_runner, retry_runner))
-        self.assertEqual(creates[proxy]["network"], f"container:{initial_runner}")
+        self.assertEqual(len(creates), 4)
+        for runner in (initial_runner, proxied_runner, retry_runner):
+            self.assertIsNone(creates[runner]["network"])
+        proxy = next(name for name in creates if name not in (initial_runner, proxied_runner, retry_runner))
+        self.assertEqual(creates[proxy]["network"], f"container:{proxied_runner}")
         self.assertEqual(state["starts"].count(retry_runner), 1)
         self.assertTrue(state["nat_containers"])
-        self.assertEqual(set(state["nat_containers"]), {initial_runner})
+        self.assertEqual(set(state["nat_containers"]), {proxied_runner})
         self.assertTrue(any(retry_runner in removal for removal in state["removals"]))
         self.assertEqual(set(state["removals"][-1]), set(creates))
         original = json.loads((root / "artifacts" / "chrome-direct.json").read_text())

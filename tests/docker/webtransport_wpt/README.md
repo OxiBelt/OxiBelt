@@ -43,6 +43,13 @@ both initial and replay JSON reports and run logs under
 on failure it also retains the proxy log. The runner needs Docker support for
 `NET_ADMIN` in its isolated test container to redirect browser WebTransport
 UDP traffic while the WPT server stays on loopback.
+Initial direct runs use a separate runner network namespace. In proxied runs,
+browser traffic to `127.0.0.1:11000` is redirected to OxiBelt at
+`127.0.0.2:11000`; only OxiBelt's upstream traffic to the virtual origin
+`127.0.0.3:11000` is translated to the real WPT server at `127.0.0.1:11000`.
+Distinct original destinations prevent an upstream socket from inheriting a
+closed browser socket's cached UDP NAT mapping when it reuses that port.
+Browser URLs, HTTP authority, SNI, trust, and parity checks remain the same.
 The Chrome `Abort client-created bidirectional stream` timeout followed by
 `NOTRUN` subtests remains an immediate failure, including when retry
 classification is enabled. Diagnose it with paired direct and proxied runs of
