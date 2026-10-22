@@ -1400,6 +1400,11 @@ the local HTTP, TLS, and WebTransport patches when updating their upstream
 sources. Build from the complete revision, lockfiles, source checksum
 manifests, and pinned image inputs.
 
+The vendored allocator remains at `mimalloc 3.5.2`. The `3.5.3` source refresh
+is deferred until the complete GNU/musl allocator qualification tracked in
+[#217](https://github.com/OxiBelt/OxiBelt/issues/217) passes. Partial comparative
+results do not qualify the replacement.
+
 Node `24` on Alpine `3.24`, Alpine `3.24`, Debian Trixie, and Python test inputs
 receive refreshed image digests; Go test builders advance to `1.27.3`.
 Image tooling selects Docker `29.9.2`, Buildx `0.38.0`, and Trivy `0.76.0`,
