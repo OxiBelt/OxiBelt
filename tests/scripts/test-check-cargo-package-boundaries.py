@@ -314,16 +314,16 @@ class CargoPackageBoundaryTests(unittest.TestCase):
             frozenset(
                 {
                     local_identity(
-                        "h2", "0.4.19", str(repo_root / "source/third_party/h2")
+                        "h2", "0.4.20", str(repo_root / "source/third_party/h2")
                     ),
                     local_identity(
                         "hyper",
-                        "1.11.1",
+                        "1.12.0",
                         str(repo_root / "source/third_party/hyper"),
                     ),
                     local_identity(
                         "rustls",
-                        "0.23.45",
+                        "0.23.46",
                         str(repo_root / "source/third_party/rustls"),
                     ),
                     local_identity(
@@ -336,7 +336,7 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                     ),
                     local_identity(
                         "quinn-proto",
-                        "0.11.18",
+                        "0.11.19",
                         str(repo_root / "source/third_party/quinn-proto"),
                     ),
                     local_identity(
@@ -346,7 +346,7 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                     ),
                     local_identity(
                         "web-transport-quinn",
-                        "0.12.1",
+                        "0.13.4",
                         str(repo_root / "source/third_party/web-transport-quinn"),
                     ),
                 }
