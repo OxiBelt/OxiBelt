@@ -88,7 +88,7 @@ precis-profiles = { version = "0.2.0", default-features = false }
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "logging", "prefer-post-quantum", "std", "tls12"] }
 rustix = { version = "1.1.5", features = ["net", "process", "std"] }
-sequoia-openpgp = { version = "=2.4.1", default-features = false, features = ["crypto-openssl"] }
+sequoia-openpgp = { version = "=2.4.2", default-features = false, features = ["crypto-openssl"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize", "comments"] }
