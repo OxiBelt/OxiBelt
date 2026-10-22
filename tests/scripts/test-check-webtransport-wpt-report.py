@@ -75,7 +75,7 @@ def pinned_report():
         indexed[f"/webtransport/{basename}.html"]["subtests"].append(
             {"name": control, "status": "PASS", "message": None}
         )
-    for test in (WORKER, SHARED_WORKER, SERVICE_WORKER):
+    for test in (OTHER, WORKER, SHARED_WORKER, SERVICE_WORKER):
         indexed[test]["subtests"].append({"name": SUBTEST, "status": "PASS", "message": None})
     return {"results": results}
 
@@ -234,16 +234,18 @@ class ChromeDirectRetryTests(unittest.TestCase):
 
 
 class ChromeProxyRetryTests(unittest.TestCase):
+    test_case = SERVICE_WORKER
+
     def setUp(self):
-        self.direct = {SERVICE_WORKER: result("PASS")}
-        self.proxied = {SERVICE_WORKER: result("FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)}
+        self.direct = {self.test_case: result("PASS")}
+        self.proxied = {self.test_case: result("FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)}
 
     def assert_not_retryable(self):
         with self.assertRaises(ValueError) as caught:
             checker.compare(self.direct, self.proxied, True, True)
         self.assertIs(type(caught.exception), ValueError)
 
-    def test_exact_serviceworker_failure_selects_proxy_replay(self):
+    def test_exact_observed_failure_selects_proxy_replay(self):
         with self.assertRaises(checker.RetryableProxyBaselineMismatch):
             checker.compare(self.direct, self.proxied, False, True)
 
@@ -265,18 +267,18 @@ class ChromeProxyRetryTests(unittest.TestCase):
             ("NOTRUN", checker.CHROME_DIRECT_RETRY_MESSAGE),
         ):
             with self.subTest(status=status, message=message):
-                self.proxied[SERVICE_WORKER] = result(status, message)
+                self.proxied[self.test_case] = result(status, message)
                 self.assert_not_retryable()
 
     def test_other_contexts_and_subtests_fail(self):
-        for test in (OTHER, WORKER, SHARED_WORKER):
+        for test in (WORKER, SHARED_WORKER):
             with self.subTest(test=test):
                 self.direct = {test: result("PASS")}
                 self.proxied = {test: result("FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)}
                 self.assert_not_retryable()
         self.setUp()
         for report in (self.direct, self.proxied):
-            report[SERVICE_WORKER]["subtests"][0]["name"] = "different subtest"
+            report[self.test_case]["subtests"][0]["name"] = "different subtest"
         self.assert_not_retryable()
 
     def test_reverse_direction_cannot_select_proxy_replay(self):
@@ -290,27 +292,27 @@ class ChromeProxyRetryTests(unittest.TestCase):
     def test_harness_errors_cannot_select_proxy_replay(self):
         for before, after in (("OK", "ERROR"), ("ERROR", "OK"), ("ERROR", "ERROR"), ("TIMEOUT", "TIMEOUT")):
             with self.subTest(before=before, after=after):
-                self.direct[SERVICE_WORKER]["status"] = before
-                self.proxied[SERVICE_WORKER]["status"] = after
+                self.direct[self.test_case]["status"] = before
+                self.proxied[self.test_case]["status"] = after
                 self.assert_not_retryable()
 
     def test_duplicate_or_different_subtest_selection_fails(self):
         for side in ("direct", "proxied"):
             with self.subTest(side=side):
                 self.setUp()
-                getattr(self, side)[SERVICE_WORKER]["subtests"] *= 2
+                getattr(self, side)[self.test_case]["subtests"] *= 2
                 self.assert_not_retryable()
         self.setUp()
-        self.proxied[SERVICE_WORKER]["subtests"] = []
+        self.proxied[self.test_case]["subtests"] = []
         self.assert_not_retryable()
 
     def test_different_case_selection_fails(self):
-        self.direct[OTHER] = result("PASS")
+        self.direct["/webtransport/unrelated.https.any.html"] = result("PASS")
         self.assert_not_retryable()
 
     def test_unrelated_mismatch_blocks_proxy_replay(self):
-        self.direct[OTHER] = result("PASS")
-        self.proxied[OTHER] = result("FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
+        self.direct["/webtransport/unrelated.https.any.html"] = result("PASS")
+        self.proxied["/webtransport/unrelated.https.any.html"] = result("FAIL", "unrelated failure")
         self.assert_not_retryable()
 
     def test_mixed_direct_and_proxy_candidates_fail(self):
@@ -334,6 +336,20 @@ class ChromeProxyRetryTests(unittest.TestCase):
         self.assertNotIn("Retryable", message)
 
 
+class ChromeWindowProxyRetryTests(ChromeProxyRetryTests):
+    test_case = OTHER
+
+    def test_reverse_direction_cannot_select_proxy_replay(self):
+        self.direct, self.proxied = self.proxied, self.direct
+        self.assert_not_retryable()
+
+    def test_window_and_serviceworker_failures_select_one_proxy_replay(self):
+        self.direct[SERVICE_WORKER] = result("PASS")
+        self.proxied[SERVICE_WORKER] = result("FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
+        with self.assertRaises(checker.RetryableProxyBaselineMismatch):
+            checker.compare(self.direct, self.proxied, True, True)
+
+
 class ClassifierCliTests(unittest.TestCase):
     def run_checker(self, direct, proxied, *flags, browser="chrome"):
         with tempfile.TemporaryDirectory(prefix="oxibelt-wpt-classifier-") as directory:
@@ -347,19 +363,51 @@ class ClassifierCliTests(unittest.TestCase):
             )
 
     def test_exit_codes_and_strict_terminal_comparison(self):
-        direct = pinned_report()
-        proxied = copy.deepcopy(direct)
-        set_subtest(proxied, SERVICE_WORKER, "FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
         both = ("--classify-chrome-direct-retry", "--classify-chrome-proxy-retry")
-        self.assertEqual(self.run_checker(direct, proxied, *both).returncode, 4)
-        self.assertEqual(self.run_checker(direct, proxied, *reversed(both)).returncode, 4)
-        self.assertEqual(self.run_checker(direct, proxied).returncode, 1)
-        self.assertEqual(self.run_checker(direct, direct, *both).returncode, 0)
-        set_subtest(direct, WORKER, "FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
-        self.assertEqual(self.run_checker(direct, proxied, *both).returncode, 1)
-        self.assertEqual(self.run_checker(direct, pinned_report(), "--classify-chrome-direct-retry").returncode, 3)
-        self.assertEqual(self.run_checker(direct, pinned_report(), *both).returncode, 3)
-        self.assertEqual(self.run_checker(direct, pinned_report(), "--classify-chrome-proxy-retry").returncode, 1)
+        for cases in ((SERVICE_WORKER,), (OTHER,), (OTHER, SERVICE_WORKER)):
+            with self.subTest(cases=cases):
+                direct = pinned_report()
+                proxied = copy.deepcopy(direct)
+                for test in cases:
+                    set_subtest(proxied, test, "FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
+                self.assertEqual(self.run_checker(direct, proxied, *both).returncode, 4)
+                self.assertEqual(self.run_checker(direct, proxied, *reversed(both)).returncode, 4)
+                self.assertEqual(self.run_checker(direct, proxied).returncode, 1)
+                self.assertEqual(self.run_checker(direct, direct, *both).returncode, 0)
+                set_subtest(direct, WORKER, "FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
+                self.assertEqual(self.run_checker(direct, proxied, *both).returncode, 1)
+                self.assertEqual(self.run_checker(direct, pinned_report(), "--classify-chrome-direct-retry").returncode, 3)
+                self.assertEqual(self.run_checker(direct, pinned_report(), *both).returncode, 3)
+                self.assertEqual(self.run_checker(direct, pinned_report(), "--classify-chrome-proxy-retry").returncode, 1)
+
+    def test_window_cli_rejects_noneligible_mismatches(self):
+        for variation in ("message", "status", "harness", "matching-error-harnesses", "subtest", "extra-mismatch", "duplicates", "selection", "reverse"):
+            with self.subTest(variation=variation):
+                direct = pinned_report()
+                proxied = copy.deepcopy(direct)
+                set_subtest(proxied, OTHER, "FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
+                target = next(entry for entry in proxied["results"] if entry["test"] == OTHER)
+                if variation == "message":
+                    target["subtests"][0]["message"] = "different failure"
+                elif variation == "status":
+                    target["subtests"][0]["status"] = "TIMEOUT"
+                elif variation in ("harness", "matching-error-harnesses"):
+                    target["status"] = "ERROR"
+                    if variation == "matching-error-harnesses":
+                        next(entry for entry in direct["results"] if entry["test"] == OTHER)["status"] = "ERROR"
+                elif variation == "subtest":
+                    for report in (direct, proxied):
+                        next(entry for entry in report["results"] if entry["test"] == OTHER)["subtests"][0]["name"] = "different subtest"
+                elif variation == "extra-mismatch":
+                    set_subtest(proxied, WORKER, "FAIL", checker.CHROME_DIRECT_RETRY_MESSAGE)
+                elif variation == "duplicates":
+                    target["subtests"] *= 2
+                elif variation == "selection":
+                    target["subtests"] = []
+                else:
+                    direct, proxied = proxied, direct
+                completed = self.run_checker(direct, proxied, "--classify-chrome-direct-retry", "--classify-chrome-proxy-retry")
+                self.assertEqual(completed.returncode, 1, completed.stderr)
 
     def test_browser_and_option_restrictions(self):
         report = pinned_report()
@@ -467,6 +515,8 @@ args = sys.argv[1:]
 root = Path(os.environ["FAKE_WPT_ROOT"])
 state = json.loads((root / "state.json").read_text())
 scenario = os.environ["FAKE_WPT_SCENARIO"]
+window = scenario.startswith("window-")
+scenario = scenario.removeprefix("window-")
 with (root / "commands.jsonl").open("a") as trace:
     trace.write(json.dumps(args) + "\n")
 if args[0] == "create":
@@ -533,14 +583,19 @@ elif args[0] == "exec" and "./wpt" in args:
         entry["subtests"][0].update(status="FAIL", message='assert_equals: reset_stream expected "reset" but got "FIN"')
     if report_name == "chrome-proxied" and scenario == "serviceworker-timeout":
         report = json.loads((root / "timeout.json").read_text())
-    failure = (report_name == "chrome-proxied" and scenario != "serviceworker-timeout" and not scenario.startswith(("firefox-", "direct-"))) or (retry and scenario == "persistent")
+    failure = (report_name == "chrome-proxied" and scenario != "serviceworker-timeout" and not scenario.startswith(("firefox-", "direct-"))) or (retry and scenario in ("persistent", "context-migration"))
     if failure or (retry and scenario == "migrating"):
         context = "worker" if retry and scenario == "migrating" else "serviceworker"
-        target = f"/webtransport/streams-close.https.any.{context}.html"
+        target = "/webtransport/streams-close.https.any.html" if window else f"/webtransport/streams-close.https.any.{context}.html"
+        if retry and scenario == "context-migration":
+            target = "/webtransport/streams-close.https.any.serviceworker.html" if window else "/webtransport/streams-close.https.any.html"
         entry = next(entry for entry in report["results"] if entry["test"] == target)
         entry["subtests"][0].update(status="FAIL", message='assert_equals: reset_stream expected "reset" but got "FIN"')
         if report_name == "chrome-proxied" and scenario == "wrong-message":
             entry["subtests"][0]["message"] = "different failure"
+    if report_name == "chrome-proxied" and scenario == "combined":
+        entry = next(entry for entry in report["results"] if entry["test"] == "/webtransport/streams-close.https.any.html")
+        entry["subtests"][0].update(status="FAIL", message='assert_equals: reset_stream expected "reset" but got "FIN"')
     if scenario.startswith("firefox-"):
         initial_failure = report_name == "firefox-proxied" and scenario != "firefox-normal"
         repeated_failure = firefox_retry and scenario in ("firefox-persistent", "firefox-migrating")
@@ -650,7 +705,7 @@ class ReplayShellTestCase(unittest.TestCase):
                 self.assertFalse(list((root / "artifacts").glob(f"{name}-moz*")))
         if "chrome-proxied" in state["runs"]:
             original = json.loads((root / "artifacts" / "chrome-proxied.json").read_text())
-            target = next(entry for entry in original["results"] if entry["test"] == SERVICE_WORKER)
+            target = next(entry for entry in original["results"] if entry["test"] == (OTHER if scenario.startswith("window-") else SERVICE_WORKER))
             if scenario == "serviceworker-timeout":
                 self.assertEqual(original, timeout_report)
             elif not scenario.startswith(("firefox-", "direct-")):
@@ -755,6 +810,23 @@ class ProxyReplayShellTests(ReplayShellTestCase):
         replay = json.loads((root / "artifacts" / "chrome-proxied-retry.json").read_text())
         self.assertEqual(replay, pinned_report())
 
+    def test_window_replay_preserves_reports_and_packet_checks(self):
+        for scenario, status in (("window-passes", 0), ("combined", 0), ("window-persistent", 1),
+                                 ("window-context-migration", 1), ("context-migration", 1),
+                                 ("window-missing-packets", 1), ("window-run-fails", 7)):
+            with self.subTest(scenario=scenario):
+                completed, state, root = self.run_gate(scenario)
+                self.assertEqual(completed.returncode, status, completed.stderr)
+                self.assertEqual(state["runs"].count("chrome-proxied-retry"), 1)
+                self.assertEqual(json.loads((root / "artifacts/chrome-direct.json").read_text()), pinned_report())
+                self.assertEqual(state["packets"], 1 if scenario == "window-missing-packets" else 3 if status == 0 else 2)
+                if status:
+                    self.assertNotIn("firefox-proxied", state["runs"])
+                if "context-migration" in scenario or scenario == "window-persistent":
+                    self.assertIn("direct/proxy baseline mismatch:", completed.stderr)
+                if scenario == "window-missing-packets":
+                    self.assertIn("Chrome retry: no browser WebTransport packets", completed.stderr)
+
     def test_persistent_or_migrating_failures_are_terminal(self):
         for scenario in ("persistent", "migrating"):
             with self.subTest(scenario=scenario):
@@ -775,7 +847,7 @@ class ProxyReplayShellTests(ReplayShellTestCase):
         self.assertNotIn("firefox-proxied", state["runs"])
 
     def test_initial_noneligible_and_mixed_mismatches_never_replay(self):
-        for scenario in ("wrong-message", "mixed"):
+        for scenario in ("wrong-message", "mixed", "window-wrong-message", "window-mixed"):
             with self.subTest(scenario=scenario):
                 completed, state, root = self.run_gate(scenario, expected_retries=0)
                 self.assertEqual(completed.returncode, 1, completed.stderr)

@@ -1076,7 +1076,7 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
     "set(direct) != set(proxied)",
     "status != after_subtests[name]",
     "duplicate subtest name",
-    "CHROME_PROXY_RETRY_CASE",
+    "CHROME_PROXY_RETRY_CASES",
     "RetryableProxyBaselineMismatch",
     "sys.exit(4)",
     "EXPECTED_CASE_COUNT = 103",

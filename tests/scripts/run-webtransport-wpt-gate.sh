@@ -322,7 +322,7 @@ for browser in chrome firefox; do
     continue
   fi
   if [[ "${browser}" == chrome && "${comparison_status}" == 4 ]]; then
-    echo 'Chrome proxied serviceworker close/abort mismatch; retrying one full proxied pass.' >&2
+    echo 'Chrome proxied window/serviceworker close/abort mismatch; retrying one full proxied pass.' >&2
     packets_before="$(proxy_nat_packets)"
     run_wpt chrome proxied chrome-proxied-retry
     packets_after="$(proxy_nat_packets)"

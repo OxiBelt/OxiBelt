@@ -28,9 +28,12 @@ CHROME_DIRECT_RETRY_CASES = frozenset(
     for context in ("worker", "sharedworker", "serviceworker")
 )
 CHROME_DIRECT_RETRY_MESSAGE = 'assert_equals: reset_stream expected "reset" but got "FIN"'
-CHROME_PROXY_RETRY_CASE = (
-    "/webtransport/streams-close.https.any.serviceworker.html",
-    "Close and abort unidirectional stream",
+CHROME_PROXY_RETRY_CASES = frozenset(
+    (test, "Close and abort unidirectional stream")
+    for test in (
+        "/webtransport/streams-close.https.any.html",
+        "/webtransport/streams-close.https.any.serviceworker.html",
+    )
 )
 
 
@@ -39,7 +42,7 @@ class RetryableDirectBaselineMismatch(ValueError):
 
 
 class RetryableProxyBaselineMismatch(ValueError):
-    """The pinned Chrome proxied run hit the observed serviceworker timing case."""
+    """The pinned Chrome proxied run hit the observed window or serviceworker close/abort case."""
 
 
 def load(path):
@@ -121,7 +124,7 @@ def compare(direct, proxied, classify_chrome_direct_retry=False, classify_chrome
                 ):
                     retryable = False
                 if (
-                    (test, name) != CHROME_PROXY_RETRY_CASE
+                    (test, name) not in CHROME_PROXY_RETRY_CASES
                     or before.get("status") != "OK"
                     or after.get("status") != "OK"
                     or status != "PASS"
