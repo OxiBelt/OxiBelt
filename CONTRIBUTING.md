@@ -492,8 +492,8 @@ OxiBelt uses the root pnpm workspace for TypeScript DevOps tooling under
 DevOps TypeScript automation, run:
 
 ```sh
-corepack enable
-corepack install
+# Select Node.js 26.12.1 before bootstrapping the pinned package manager.
+tests/scripts/install-pinned-corepack.sh
 pnpm install --frozen-lockfile
 pnpm run dependency-admission
 pnpm run lint

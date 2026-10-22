@@ -54,10 +54,14 @@ jobs:
           [[ "${live_main}" == "${OXIBELT_SOURCE_REVISION}" ]]
           printf 'revision=%s\n' "${OXIBELT_SOURCE_REVISION}" >>"${GITHUB_OUTPUT}"
 
-      - name: Enable hash-pinned pnpm
-        run: |
-          corepack enable
-          corepack install
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
+        run: tests/scripts/install-pinned-corepack.sh
 
       - name: Install Node dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
@@ -127,10 +131,14 @@ jobs:
           [[ "$(git rev-parse --verify refs/remotes/origin/main^{commit})" == "${OXIBELT_SOURCE_REVISION}" ]]
           [[ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')" == "${OXIBELT_SOURCE_REVISION}" ]]
 
-      - name: Enable hash-pinned pnpm
-        run: |
-          corepack enable
-          corepack install
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
+        run: tests/scripts/install-pinned-corepack.sh
 
       - name: Install Node dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
@@ -238,10 +246,14 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/feature-graduation-raw/arm64
 
-      - name: Enable hash-pinned pnpm
-        run: |
-          corepack enable
-          corepack install
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
+        run: tests/scripts/install-pinned-corepack.sh
 
       - name: Install Node dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
@@ -696,10 +708,14 @@ jobs:
           merge-multiple: true
           path: qualification-evidence
 
-      - name: Enable hash-pinned pnpm
-        run: |
-          corepack enable
-          corepack install
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
+        run: tests/scripts/install-pinned-corepack.sh
 
       - name: Install Node dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts

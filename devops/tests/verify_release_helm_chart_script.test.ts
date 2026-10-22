@@ -61,7 +61,7 @@ case "$1" in
 esac`)
     WriteExecutable(Path.join(Bin, 'oras'), `
 [[ -z "\${COMMAND_LOG:-}" ]] || printf 'oras:%s\\n' "$*" >>"\${COMMAND_LOG}"
-if [[ "$1" == version ]]; then echo "\${ORAS_VERSION:-Version: 1.3.4}"; exit 0; fi
+if [[ "$1" == version ]]; then echo "\${ORAS_VERSION:-Version: 1.3.5}"; exit 0; fi
 case "\${MANIFEST_VARIANT:-legacy}" in
   legacy) active_manifest='${Manifest}'; active_digest='${Digest}' ;;
   helm4) active_manifest='${Helm4Manifest}'; active_digest='${Helm4Digest}' ;;
@@ -157,7 +157,7 @@ fi`)
     const DuplicateWork = Path.join(Directory, 'duplicate-work'); Fs.mkdirSync(DuplicateWork)
     Assert.throws(() => RunScript([...Arguments(DuplicateWork), '--mode', 'consume'], Environment), /usage/)
     const OrasVersionWork = Path.join(Directory, 'oras-version-work'); Fs.mkdirSync(OrasVersionWork)
-    Assert.throws(() => RunScript(Arguments(OrasVersionWork), { ...Environment, ORAS_VERSION: 'Version: 9.9.9' }), /approved 1\.3\.4/)
+    Assert.throws(() => RunScript(Arguments(OrasVersionWork), { ...Environment, ORAS_VERSION: 'Version: 9.9.9' }), /approved 1\.3\.5/)
     const OversizedArchive = Path.join(Directory, 'oversized.tgz'); Fs.writeFileSync(OversizedArchive, Buffer.alloc(16 * 1024 * 1024 + 1))
     const OversizedWork = Path.join(Directory, 'oversized-work'); Fs.mkdirSync(OversizedWork)
     Assert.throws(() => RunScript([...Arguments(OversizedWork).map(Value => Value === Archive ? OversizedArchive : Value)], Environment), /source archive is outside/)

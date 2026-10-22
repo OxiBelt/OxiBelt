@@ -1063,6 +1063,12 @@ criteria = "safe-to-deploy"
 delta = "0.56.0 -> 0.59.0"
 notes = "Reviewed the checksum-verified production source delta for the existing no-default-features serde_json deployment. Reference compilation now defers chains after eight nested targets; cache keys distinguish actual schemas and dynamic scopes, cyclic edges stay weak, and Validator owns deferred targets through drop. Array/type/count fusion, required/property fusion, annotation and error-location changes retain the selected Draft 7 validation contracts; regex-failure outcome exploration is capped at 64 runs. Canonicalization gains reason attribution, seed reuse and bounded distribution/refolding; OxiBelt does not invoke canonicalization. The MIT license and MSRV 1.85 remain unchanged, with no core build script. Python/Ruby, jsonb, macros and HTTP/file/async retrieval remain disabled; this review does not authorize those integrations. All 1,994 upstream library tests and 54 reference/lazy-value/ownership integration tests pass. In 108,952 old/new comparisons acceptance is identical; four external named-anchor cases correct schema error locations, while all tested OxiBelt native/deployment schema results, paths and messages match. The coordinated value crate introduces a separately reviewed empty selected-feature build script admitted with source-review owner @piquark6046 and future feature review tracked in repository issue #304."
 
+[[audits.jsonschema]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.59.0 -> 0.60.0"
+notes = "Reviewed the complete checksum-matched source and manifest delta and affected reference, path, regex-assumption and validation callers. Const/enum errors share immutable Arc<Value> data while preserving numeric equality and rendered messages; keyword metadata remains aligned with validator order. Direct single-validator calls preserve SchemaNode validation behavior, reference cycle guards remain ahead of memoization, and the new visit threshold changes caching cost only. Failed-regex outcomes retain the existing bounded assumption search and error identity while caching deterministic failures and using hashed error intersections. No new unsafe code, build script or enabled external capability is added. Exact old/new OxiBelt native Draft7 schema and 922 total configuration/keyword/reference cases have identical validity, evaluation flags and ordered error paths/messages; candidate tests pass for depth-64 duplicated recursive references, 300 failed regex subjects and 100000 definite errors beside an unfinished match. Public const/enum error fields now use Arc<Value>; OxiBelt consumes accessors and Display. Python, Ruby, network retrieval and generated-validator features were not enabled in this qualification."
+
 [[audits.jsonschema-regex]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1129,6 +1135,12 @@ criteria = "safe-to-deploy"
 delta = "0.56.0 -> 0.59.0"
 notes = "Reviewed the complete checksum-verified source and manifest delta. The translator escapes Rust-only class set operators without losing ECMA ranges, expands whitespace from the existing exact ECMA whitespace predicate, and accepts non-alphanumeric identity escapes required by older JSON Schema dialects. Character offsets come from UTF-8 char_indices and inserted escapes do not index split code points. Existing OxiBelt patterns have no affected class-set, whitespace or identity-escape forms; native/deployment schema differential checks preserve acceptance and error paths/messages. All 294 upstream unit tests pass. Runtime dependencies, MIT licensing and MSRV 1.85 are unchanged; no build script or new ambient capability is added."
 
+[[audits.jsonschema-regex]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.59.0 -> 0.60.0"
+notes = "Reviewed the complete checksum-matched package delta. All Rust source, regex translation logic, dependencies, features, MIT license and Rust minimum are unchanged; changes are package version, VCS metadata and generated lockfile entries. No build script or external capability is added. The candidate participates in the 922-case old/new OxiBelt schema differential and focused regex qualification."
+
 [[audits.jsonschema-value]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1194,6 +1206,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.56.0 -> 0.59.0"
 notes = "Reviewed the checksum-verified selected serde_json numeric/comparison delta and feature boundaries. Default serde_json adapters and node ownership are unchanged. Exact-zero checks distinguish literal underflow for representations retaining digits; large plain-integer divisibility uses bounded remainder arithmetic, and unplaceable generic numbers return conservative answers instead of panicking. All 97 upstream unit and 13 numeric integration tests pass, and coordinated old/new OxiBelt schema comparisons match. MIT licensing, MSRV 1.85 and selected runtime dependency requirements are unchanged. New build.rs has an empty main with selected serde_json-only features; its sole optional action invokes pyo3_build_config only under the still-disabled pyo3 feature. Source-review owner @piquark6046 tracks this boundary and future activation in repository issue #304. New jsonb and changed Python/Ruby adapters remain unselected, and this audit does not authorize or certify those integrations."
+
+[[audits.jsonschema-value]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.59.0 -> 0.60.0"
+notes = "Reviewed the complete checksum-matched package delta. Rust source, JSON value/number semantics and the existing feature-gated build script are byte-identical. Only the optional pyo3 and pyo3-build-config version floor advances from 0.29 to 0.30 beyond package/VCS/lock metadata; these optional features are disabled in OxiBelt. Features, MIT license and Rust minimum are unchanged. The candidate participates in the 922-case old/new OxiBelt schema differential, including const and enum numeric equality cases; Python and Ruby bindings were not executed."
 
 [[audits.keccak]]
 who = "OpenAI Codex"
@@ -1747,6 +1765,12 @@ criteria = "safe-to-deploy"
 delta = "0.56.0 -> 0.59.0"
 notes = "Reviewed the complete checksum-verified source and manifest delta. A dynamic anchor found in another document now bases internal references at that document while retaining its dynamic scope; vocabulary lookup honors an explicitly declared nested schema before inheriting its containing root vocabulary. URI resolution continues through the existing registry and error-returning resolver, with no new retriever or implicit I/O. All 149 upstream unit tests pass, including cross-document dynamic-anchor base resolution. The existing native Draft 7 schema has no references; fixed deployment-schema local-reference behavior is covered by coordinated old/new comparisons. Dependencies, features, MIT license and MSRV 1.85 are unchanged; no build script or unsafe boundary is introduced."
 
+[[audits.referencing]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.59.0 -> 0.60.0"
+notes = "Reviewed the complete checksum-matched package delta. All Rust source, URI/reference resolution, dependencies, features, MIT license and Rust minimum are unchanged; changes are package version, VCS metadata and generated lockfile entries. No build script or external capability is added. The candidate participates in the 922-case old/new OxiBelt schema differential and depth-64 recursive-reference qualification."
+
 [[audits.regex-automata]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -2065,6 +2089,12 @@ criteria = "safe-to-deploy"
 delta = "2.0.20 -> 2.0.21"
 notes = "Reviewed the complete checksum-matched source and manifest delta. Attribute expression token parsing tracks nested turbofish depth and excludes arrow tokens from closing angle handling, so following field access is parsed in the proper expression context. Parsing still consumes compiler-provided tokens and emits the same error implementation structure. No build script, unsafe code, filesystem/network authority or dependency change is introduced. Focused expression, display, source, From and transparent-error tests pass through the matching companion."
 
+[[audits.tinystr]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.8.4 -> 0.8.5"
+notes = "Reviewed the complete checksum-matched package delta. Adds inherent const and trait Default implementations returning the existing empty ASCII representation; UnvalidatedTinyAsciiStr delegates to the same constructor. Parsing, validation and representation invariants are unchanged. Dependency floors advance only to the separately reviewed zerovec 0.11.9; features, license and Rust minimum are unchanged, with no build script or external capability. The exact candidate's 19 unit tests pass with std and zerovec enabled."
+
 [[audits.tinyvec]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -2088,6 +2118,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "1.53.1 -> 1.53.3"
 notes = "Reviewed the complete checksum-verified Tokio1.53.1 to1.53.3 production source and manifest delta for the selected stable Linux runtime/sync/fs/I/O/macros/time graph. MPSC wrapping retirement preserves producer claims and acquire/release ownership; permits are forgotten before callback-bearing send. Semaphore waiter/permit cleanup is recorded before callbacks, close wakes detached waiters after releasing the mutex, and completion clears cleanup only at final handoff. Replaced DuplexStream/JoinSet wakers and broadcast notifications leave locks before callback/drop. Standard pinned timer entry, cancellation and driver-lock lifetime fence are unchanged; timer shutdown drains entries without repeated wheel rotation. AsyncFd explicit unsafe registration retains valid descriptor ownership and existing callers remain source compatible. Unselected Windows and unstable io_uring/taskdump/tracing changes were reviewed separately; submitted io_uring operations retain resources until completion/cancellation, but no unstable or Windows execution qualification is claimed. Dependency requirements/features/target capabilities, build=false, MIT license and MSRV1.71 are unchanged.807 ordinary upstream tests across library plus34 integration targets pass under stable full+test-util, including wrap/panic-waker/cancel/close-reentry/timer regressions; exact root and probe stable feature checks also pass. This is source-backed delta review with bounded native AMD64 execution, not Loom/Miri/sanitizer or exhaustive interleaving certification; current policy feature/target boundaries remain required."
+
+[[audits.tokio]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.53.3 -> 1.54.1"
+notes = "Composed the checksum-verified Tokio 1.53.3 to 1.54.1 delta review from the prior complete 1.53.1 to 1.54.0 source reviews, already-admitted 1.53.3 maintenance review, and an independent exact-source review of every 1.54.0 to 1.54.1 production source change. TimerEntry again owns its runtime handle and always cancels in pinned Drop: removing the interval timer with Pin::set acquires the driver mutex before inline TimerShared storage is destroyed, including after observing completion; fire and AtomicWaker extraction complete while that mutex is held. Captured wakers are dropped after unlocking. The alternative timer restores cancellation in Drop but remains outside selected execution scope. Prior inspected scheduler injection/idle publication, Notify ordering, semaphore cancellation/close, MPSC permit ownership, broadcast slot locking and blocking queue lifetime conclusions apply to byte-identical source. Stable builds can opt into the reviewed sharded blocking queue through TOKIO_UNSTABLE_SHARDED_BLOCKING_QUEUE; absent that environment setting the locked queue remains the default. Earlier I/O/fs/process review and the admitted maintenance delta cover the unchanged non-timer source, including AsyncFd ownership and compatibility, positive duplex capacities and submitted io_uring resource ownership. MSRV rises from 1.71 to 1.85 and is below the repository 1.99.1 baseline; Emscripten target support expands, while selected Linux dependency requirements/features, MIT license and build=false are retained. This is scoped actual-source delta review for the selected stable Linux graph, not whole-crate certification, a formal interleaving proof, or Loom/Miri/sanitizer/unstable/cross-target execution qualification. Native upstream library and integration qualification passes 1578 tests across 188 targets with full and test-util features; the isolated test harness only unifies tokio-test/tokio-stream with the exact candidate runtime identity."
 
 [[audits.tokio-macros]]
 who = "OpenAI Codex"
@@ -2305,6 +2341,12 @@ criteria = "safe-to-deploy"
 delta = "0.12.1 -> 0.13.3"
 notes = "Reviewed the complete checksum-verified upstream delta and the rebased local fork. CloseReason retains the first cause and preserves raw QUIC versus legacy HTTP3 error codes; bounded stream-header reads retain reset causes and encoded widths for existing final-size accounting. Missing datagram capacity returns zero and priority widens to i32. Existing local draft02/16 negotiation, capsule bounds, drain latch, reset-prefix accounting, per-session credits and retained task/writer ownership remain preserved. The selected actual receive adapter continues to use initialized Tokio ReadBuf storage; generic/raw/poll receive defaults remain forbidden and the separate exact trait0.5.1 exception is not replaced by this audit. No new unsafe code, build script or provider selection is added. All38 all-feature fork tests,28 actual first-party adapter/capsule/budget harness tests including live draft02/16 uni/bidi/datagram/reset/STOP checks, Ring tests and no-provider checks pass. These isolated boundary tests do not replace integrated routing, authorization, HTTP3 or browser qualification. Companion Kio is separately audited, and the local protocol0.6.2 draft16 fork remains unchanged."
 
+[[audits.web-transport-trait]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+version = "0.5.2"
+notes = "Reviewed the checksum-verified complete 783-line production source, manifest, and 0.5.1-to-0.5.2 delta independently. Async and poll receive defaults initialize every exposed destination byte, cap initialization at 8192 bytes, validate returned lengths before unsafe BufMut advancement, and retain the original exclusive borrow and bounds. Chunk reads respect the requested maximum despite over-allocation; Pending, cancellation and errors do not advance the destination. Remaining session/send/statistics helpers are safe contract-driven delegation; no build script, FFI, filesystem, network or process capability is added and the sole dependency remains bytes under MIT OR Apache-2.0. All upstream tests, including adversarial receive destinations, invalid lengths, bounded initialization, zero progress and cancellation, pass natively and under Miri. OxiBelt retains its private initialized Tokio receive adapter and protocol resource bounds."
+
 [[audits.webpki-root-certs]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -2346,6 +2388,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.8.18 -> 0.8.19"
 notes = "Reviewed the complete checksum-matched package delta. Executable changes only include Windows ARM64EC in existing AArch64 NEON cfg branches; Linux AMD64, ARM64 and RISC-V implementations, algorithms, dependencies and feature selection remain unchanged. Upstream selected hash/vector comparisons use immutable VCS-matched omitted fixtures; architecture execution evidence is limited to the AMD64 host. No new build script or external capability is added."
+
+[[audits.yoke]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.8.3 -> 0.8.4"
+notes = "Reviewed the complete checksum-matched package delta. The new AsRef implementation borrows through get without extending a lifetime; Box cart conversion uses NonNull::from(Box::leak) and retains the matching Box::from_raw ownership recovery. Other source edits are doctest transmute annotations. Dependency floors advance only to separately reviewed yoke-derive 0.8.4; features, license and Rust minimum are unchanged, with no build script or external capability. The exact candidate's 12 unit tests pass with derive enabled."
 
 [[audits.yoke-derive]]
 who = "OpenAI Codex"
@@ -2418,6 +2466,18 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "1.9.0 -> 1.9.1"
 notes = "Reviewed the complete checksum-verified package delta and OxiBelt byte-array, Vec<u8>, and String call sites. Zeroizing Debug becomes opaque, fallback observation reads MaybeUninit<u8> rather than potentially uninitialized u8, and Vec zeroization clears spare capacity before zeroizing and dropping initialized elements. Existing typed volatile stores remain observable without the removed redundant barriers; no build script or dependency change is introduced. Upstream allocation/erasure, derive, serialization, and doctests pass, as do feature-matched secret-debug and byte-erasure checks."
+
+[[audits.zerovec]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.11.8 -> 0.11.9"
+notes = "Reviewed the complete checksum-matched package delta and surrounding mutation and boxed-DST conversion invariants. A drop guard empties VarZeroVecOwned on an unwinding insert, remove or replace, while normal completion preserves state; the empty insert now checks the same index-width bound. Boxed VarULE casting uses a repr(C) pointer-and-metadata carrier with compile-time layout checks and preserves the original allocation pointer's provenance; VarULE explicitly requires slice-like DST metadata. Remaining changes are tests and documentation. Dependency floors advance only to separately reviewed yoke 0.8.4 and zerovec-derive 0.11.7; no build script or external capability is added. All 85 upstream library tests pass with all features on AMD64; the panic-safety and boxed VarULE tests also pass under Miri. Other architectures were not executed."
+
+[[audits.zerovec-derive]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.11.6 -> 0.11.7"
+notes = "Reviewed the complete checksum-matched package delta and surrounding VarULE validation/code generation. Replaces tuple-based metadata extraction with an explicit repr(C) two-usize carrier and compile-time size/alignment assertions; the original bytes pointer still supplies the returned reference's provenance and the tail validator and field bounds are unchanged. The declared Rust 1.83 minimum is below OxiBelt's toolchain. Dependencies, feature selection and Unicode-3.0 license are unchanged, with no build script or external capability. Seven unchanged upstream integration tests pass in a temporary zerovec consumer harness, including the custom VarULE boxed round trip; the published derive package omits its circular zerovec dev dependency and cannot run these tests standalone. Miri was not executed."
 
 [[audits.zlib-rs]]
 who = "OpenAI Codex"

@@ -869,7 +869,7 @@ class ComparatorTest(unittest.TestCase):
             "--expected-build-kind", "official_release",
             "--expected-created", "2026-07-21T00:00:00Z",
             "--rust-builder-image", "rust:1.99.1-trixie@sha256:" + "1" * 64,
-            "--node-builder-image", "node:24-alpine3.24@sha256:" + "2" * 64,
+            "--node-builder-image", "node:26.12.1-alpine3.24@sha256:" + "2" * 64,
             "--runtime-image", "alpine:3.24@sha256:" + "3" * 64,
             "--repo-root", str(REPO_ROOT),
         ]

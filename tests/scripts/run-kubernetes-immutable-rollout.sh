@@ -9,9 +9,9 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-gateway_api_version="v1.6.2"
+gateway_api_version="v1.6.3"
 gateway_api_url="https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml"
-gateway_api_sha256="faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9"
+gateway_api_sha256="356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5"
 # Pin the linux/amd64 manifest from the reviewed 9.1.2-alpine index
 # sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11.
 # Kind imports all referenced platforms, so a partially pulled index cannot be

@@ -47,7 +47,7 @@ permissions:
   packages: read
 
 env:
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
 
 jobs:
   resolve:
@@ -86,11 +86,14 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: Enable hash-pinned pnpm
-        run: |
-          set -euo pipefail
-          corepack enable
-          corepack install
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
+        run: tests/scripts/install-pinned-corepack.sh
         working-directory: verifier
 
       - name: Install release-planning dependencies
@@ -315,7 +318,7 @@ jobs:
           fi
 
       - name: Start isolated rootless Docker
-        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
         with:
           version: v29.9.2
           rootless: true
@@ -348,20 +351,23 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.38.0
+          version: v0.38.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Setup pinned Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
-          version: v0.76.0
+          version: v0.76.1
           cache: false
 
-      - name: Enable hash-pinned pnpm
-        run: |
-          set -euo pipefail
-          corepack enable
-          corepack install
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
+        run: tests/scripts/install-pinned-corepack.sh
         working-directory: verifier
 
       - name: Install verifier dependencies without lifecycle scripts
@@ -459,11 +465,16 @@ jobs:
         with:
           version: v4.3.1
 
-      - name: Enable hash-pinned pnpm and install verifier dependencies
+      - name: Set up Node.js 26.12.1
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          package-manager-cache: false
+
+      - name: Install verified Corepack and pinned pnpm
         run: |
           set -euo pipefail
-          corepack enable
-          corepack install
+          tests/scripts/install-pinned-corepack.sh
           pnpm install --frozen-lockfile --ignore-scripts
         working-directory: verifier
 
@@ -473,8 +484,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -m 0700 "${GOBIN}"
-          go install oras.land/oras/cmd/oras@v1.3.4
-          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.4($|[[:space:]])'
+          go install oras.land/oras/cmd/oras@v1.3.5
+          "${GOBIN}/oras" version | grep -E '(^|[[:space:]])1\.3\.5($|[[:space:]])'
 
       - name: Rebuild, authenticate, and compare exact chart bytes
         working-directory: verifier
@@ -777,7 +788,7 @@ jobs:
           merge-multiple: true
 
       - name: Start isolated rootless Docker for registry readback
-        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
         with:
           version: v29.9.2
           rootless: true
@@ -788,7 +799,7 @@ jobs:
       - name: Setup pinned Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.38.0
+          version: v0.38.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Validate receipt inventory and snapshot immutable subjects

@@ -21,7 +21,7 @@ firefox_version="158.0.1"
 firefox_sha256="dce45470139242cf294eb6ada3d192a9bb334696842b02b71ade448a139eb41a"
 geckodriver_version="0.37.1"
 geckodriver_sha256="e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e"
-base_image="docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f"
+base_image="docker.io/library/debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad"
 firefox_image="oxibelt/firefox-webdriver:${firefox_version}-geckodriver-${geckodriver_version}"
 image_tar="${output_dir%/}/oxibelt-firefox-webdriver-image.tar"
 

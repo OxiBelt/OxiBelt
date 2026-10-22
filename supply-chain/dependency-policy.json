@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "policyOwner": "OxiBelt maintainers",
-  "reviewedOn": "2026-10-20",
+  "reviewedOn": "2026-10-22",
   "maxExceptionDays": 90,
   "rust": {
     "allowedRegistries": [
@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "77a9f608b0e414c5d89b555de1cc87ac539f2c29ce20597a3ea553467ec8f9e0",
-      "exemptionInventorySha256": "7df6b2a350966d4baa6a60fe386e3ad6398596939b58d72225f19537449e032f",
-      "exemptedPackageVersions": 452
+      "lockfileSha256": "409475f8a48c22614fcb23f4b8b37b88aba710b99256134cd8c71d7203fbe64b",
+      "exemptionInventorySha256": "a3a741dff48a1c36313ad0e71dab0ddb6d5a8263b287571467a2e92742454f59",
+      "exemptedPackageVersions": 451
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -305,16 +305,16 @@
       },
       {
         "name": "web-transport-quinn",
-        "version": "0.13.3",
+        "version": "0.13.4",
         "path": "source/third_party/web-transport-quinn",
         "upstreamRepository": "https://github.com/moq-dev/web-transport",
-        "upstreamArchiveSha256": "251772dde5c7b78a532af0df7597259186456b683b46fc516745585684574a0e",
+        "upstreamArchiveSha256": "66234f11125d2653cd498933e36b472e96cde4d26c6985a3fb27deb1d9b8f4ed",
         "manifestPath": "supply-chain/web-transport-quinn-source.sha256",
-        "manifestSha256": "742d562518a01e5f76103b7f1d1ee6b811a15c86a82f4164ad4e9723b8cef89e",
+        "manifestSha256": "5787c0ed2d3657f93bf320c115b45511397387ab903ad418c057fb49f0037e7b",
         "license": "MIT OR Apache-2.0",
         "owner": "@piquark6046",
         "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/220",
-        "reviewedOn": "2026-10-20",
+        "reviewedOn": "2026-10-22",
         "maintenanceReviewIntervalDays": 30,
         "removalCriteria": "Replace this patch when upstream web-transport-quinn supports draft 16 CONNECT negotiation, session flow control, stream resets, and draft 02 compatibility. Review every update and rerun WebTransport and dependency admission suites."
       }
@@ -489,10 +489,10 @@
             "0.6.2"
           ],
           "web-transport-quinn": [
-            "0.13.3"
+            "0.13.4"
           ],
           "web-transport-trait": [
-            "0.5.1"
+            "0.5.2"
           ]
         },
         "reviewBoundary": "message framing, certificate verification, protocol state machines, parser limits, and unsafe or platform code"
@@ -501,7 +501,7 @@
         "category": "parsing-serialization",
         "packages": {
           "jsonschema": [
-            "0.59.0"
+            "0.60.0"
           ],
           "online-dsl-forge": [
             "0.3.5"
@@ -650,7 +650,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:77a9f608b0e414c5d89b555de1cc87ac539f2c29ce20597a3ea553467ec8f9e0",
+      "subject": "Cargo.lock@sha256:409475f8a48c22614fcb23f4b8b37b88aba710b99256134cd8c71d7203fbe64b",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test. The maintainer approved exactly bindgen 0.72/0.73 and prettyplease 0.2/0.3 coexistence through 2026-11-03 under issue #304 for retained OpenSSL and refreshed AWS-LC build-tool requirements; other compatibility lines remain frozen. The maintainer also approved replacing exactly bit-set 0.8/0.9 with 0.8/0.11 and bit-vec 0.8/0.9 with 0.8/0.10 through 2026-11-03 under issue #304 for refreshed LALRPOP; the obsolete itertools 0.14 line is retired.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -663,7 +663,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:77a9f608b0e414c5d89b555de1cc87ac539f2c29ce20597a3ea553467ec8f9e0",
+      "subject": "Cargo.lock@sha256:409475f8a48c22614fcb23f4b8b37b88aba710b99256134cd8c71d7203fbe64b",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -757,18 +757,7 @@
       "rationale": "Whole-crate certification remains withheld because the optional HTTPS proxy connector can reuse cluster TLS roots and identity. OxiBelt keeps kube-client's HTTP and SOCKS proxy features disabled and seals its client construction behind a tested direct-transport adapter that rejects loaded proxy settings and disabled certificate verification before client creation.",
       "owner": "@piquark6046",
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/120",
-      "reviewedOn": "2026-07-31",
-      "expiresOn": "2026-10-23"
-    },
-    {
-      "id": "rust-cargo-vet-web-transport-trait-0.5.1",
-      "ecosystem": "rust",
-      "control": "cargo-vet",
-      "subject": "web-transport-trait@0.5.1:safe-to-deploy",
-      "rationale": "Whole-crate certification remains withheld because generic async and poll receive helpers reinterpret BufMut spare capacity as mutable bytes and rely on an unenforced initialized-length contract. OxiBelt confines WebTransport to a private adapter using web-transport-quinn's Tokio AsyncRead path into initialized storage and excludes direct generic, raw, and poll receive APIs. The maintainer approved replacing the exact 0.4.0 exception with 0.5.1 under issue 121, retaining this containment and bounded expiry pending an upstream redesign or dependency removal.",
-      "owner": "@piquark6046",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/121",
-      "reviewedOn": "2026-10-20",
+      "reviewedOn": "2026-10-22",
       "expiresOn": "2026-11-03"
     },
     {

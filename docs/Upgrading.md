@@ -1393,24 +1393,44 @@ mixing dependency generations.
 ### Current development dependency refresh
 
 The October 2026 dependency refresh advances the integrity-pinned pnpm
-toolchain to `12.14.0`, Oxlint to `1.89.0`, and Rust builders to `1.99.1`.
-The minimum supported Rust version remains `1.98`; Node `24` remains the
-supported LTS line, with matching Node 24 types. Refreshed Rust graphs retain
+toolchain to `12.15.0`, retains Oxlint `1.89.0`, and uses Rust `1.99.1` for
+both the minimum supported compiler and builders. Rust `1.98` builds are no
+longer supported. Node `26.12.1` and matching Node 26 types replace Node 24
+for contributor tooling, CI, and UI builders. This adopts Node 26 before its
+scheduled October 28, 2026 LTS transition; it is still a Current release at
+the October 22 refresh. Select Node `26.12.1`, then run
+`tests/scripts/install-pinned-corepack.sh` to install checksum-verified
+Corepack `0.36.0` and the hash-pinned pnpm version. Node 26 does not bundle
+Corepack. Keep frozen installs and lifecycle scripts disabled.
+
+Refreshed Rust graphs retain
 the local HTTP, TLS, and WebTransport patches when updating their upstream
 sources. Build from the complete revision, lockfiles, source checksum
 manifests, and pinned image inputs.
+
+Tokio advances to `1.54.1` and the JSON Schema family to `0.60.0`, retaining
+the selected Draft 7 schema, disabled remote retrieval, and existing validation
+results. The WebTransport refresh retains OxiBelt's initialized receive adapter
+and local protocol patches; reviewed trait `0.5.2` replaces its exact temporary
+admission exception. These updates introduce no configuration or state migration.
 
 The vendored allocator remains at `mimalloc 3.5.2`. The `3.5.3` source refresh
 is deferred until the complete GNU/musl allocator qualification tracked in
 [#217](https://github.com/OxiBelt/OxiBelt/issues/217) passes. Partial comparative
 results do not qualify the replacement.
 
-Node `24` on Alpine `3.24`, Alpine `3.24`, Debian Trixie, and Python test inputs
+Node `26.12.1` on Alpine `3.24`, Alpine `3.24`, Debian Trixie, and Python test inputs
 receive refreshed image digests; Go test builders advance to `1.27.3`.
-Image tooling selects Docker `29.9.2`, Buildx `0.38.0`, and Trivy `0.76.0`,
-retaining the existing image roles and vulnerability policy. Current Helm
-qualification uses `3.22.1` and `4.3.1`; deterministic chart packaging requires
-`4.3.1`. Historical chart verification retains its original coherent tool
+Image tooling selects Docker `29.9.2`, Buildx `0.38.1`, and Trivy `0.76.1`,
+retaining the existing image roles and vulnerability policy. BuildKit `0.34.1`
+and Trivy `0.76.1` include upstream certificate-trust updates for compromised
+eMudhra intermediates. Registry connections using an affected certificate
+chain can now fail TLS verification; replace that chain before pulling or
+pushing images. See the [BuildKit security release notes](https://github.com/moby/buildkit/releases/tag/v0.34.1)
+and [Trivy security release notes](https://github.com/aquasecurity/trivy/releases/tag/v0.76.1).
+Current Helm qualification uses `3.22.1` and `4.3.1`; deterministic chart
+packaging requires `4.3.1`. Historical chart verification retains its original
+coherent tool
 pair and source-matched packager, rather than combining qualification
 versions from different revisions.
 
@@ -1480,7 +1500,7 @@ dedicated-connection limits retain their existing behavior. This diagnostic
 change requires no configuration or persisted-state migration; rollback uses
 the previous complete immutable image.
 
-The Gateway API graduation target advances from `v1.6.1` to `v1.6.2`, standard
+The Gateway API graduation target advances from `v1.6.1` to `v1.6.3`, standard
 channel, with required resources still served as `v1`. Before rolling out a
 controller built from this development revision, verify the standard CRD
 bundle against the SHA-256 pinned in the
@@ -1492,8 +1512,8 @@ the CRDs as an implicit Helm rollback. The integration remains `experimental`,
 with the same Kubernetes `1.34`–`1.37` graduation range and the current Helm
 `3.22.1`/`4.3.1` targets described in [KubernetesSupport.md](KubernetesSupport.md).
 
-The NGINX `1.31.7` and OpenResty `1.31.1.1-3-alpine` updates apply only to
-benchmark comparator images. Chrome `155.0.8059.84`, Firefox `158.0.1` and the refreshed sanitizer,
+The NGINX `1.31.8` and OpenResty `1.31.1.1-3-alpine` updates apply only to
+benchmark comparator images. Chrome `156.0.8078.47`, Firefox `158.0.1` and the refreshed sanitizer,
 database, object-store, and test-helper images remain validation inputs. These
 updates do not change an OxiBelt release-image role or require an operator
 migration.

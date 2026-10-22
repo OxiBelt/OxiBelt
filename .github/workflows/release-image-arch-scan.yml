@@ -48,7 +48,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_NET_RETRY: "10"
-  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+  OXIBELT_BUILDKIT_IMAGE: moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
   OXIBELT_GHCR_IMAGE: ${{ inputs.image }}
   OXIBELT_IMAGE_ROLE: ${{ inputs.image_role }}
   OXIBELT_ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
@@ -102,7 +102,7 @@ jobs:
           cp -R "${RUNNER_TEMP}/oxibelt-release-metadata/workspace/." .
 
       - name: Start isolated rootless Docker
-        uses: docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0
+        uses: docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0
         with:
           version: v29.9.2
           rootless: true
@@ -134,7 +134,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
-          version: v0.38.0
+          version: v0.38.1
           driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}
 
       - name: Build Docker image artifact
@@ -620,7 +620,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.76.0
+          version: v0.76.1
           scan-type: image
           image-ref: ${{ steps.trivy-image.outputs.image_id }}
           format: json
@@ -632,7 +632,7 @@ jobs:
       - name: Generate CycloneDX platform SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          version: v0.76.0
+          version: v0.76.1
           scan-type: image
           image-ref: ${{ steps.trivy-image.outputs.image_id }}
           format: cyclonedx
@@ -812,7 +812,7 @@ jobs:
             --arg pnpm "pnpm ${pnpm_version}" \
             --arg buildx "${buildx_version}" \
             --arg buildkit "${OXIBELT_BUILDKIT_IMAGE}" \
-            --arg trivy "trivy v0.76.0" \
+            --arg trivy "trivy v0.76.1" \
             --arg cc "${cc_identity}" \
             --arg ld "Rust target linker ${rust_target}" \
             --arg feature_graph_sha256 "sha256:${feature_graph_sha256}" \

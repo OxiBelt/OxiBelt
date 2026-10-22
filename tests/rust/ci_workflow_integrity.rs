@@ -911,7 +911,7 @@ fn firefox_webdriver_helper_image_is_pinned_nonroot_and_nss_ready() {
 
   for expected in [
     "FROM ${DEBIAN_IMAGE} AS fetch",
-    "docker.io/library/debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+    "docker.io/library/debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad",
     "ARG FIREFOX_VERSION=158.0.1",
     "ARG FIREFOX_SHA256=dce45470139242cf294eb6ada3d192a9bb334696842b02b71ade448a139eb41a",
     "ARG GECKODRIVER_VERSION=0.37.1",
@@ -992,7 +992,7 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
     "ece2d7fdc436d4b9a3856877163b07ec15c05354",
     "git -C /opt/wpt rev-parse HEAD",
     "git -C /opt/wpt status --porcelain",
-    "155.0.8059.84",
+    "156.0.8078.47",
     "158.0.1",
     "sha256sum --check --strict",
     "python3 -m venv /opt/wpt/_venv3",
@@ -1025,7 +1025,7 @@ fn webtransport_wpt_gate_is_pinned_complete_and_required() {
     .expect("WPT gate script should be readable");
   for expected in [
     "webtransport/",
-    "oxibelt/webtransport-wpt:ece2d7fdc436-chrome155-firefox158-prefs156",
+    "oxibelt/webtransport-wpt:ece2d7fdc436-chrome156-firefox158-prefs156",
     "test \"$(cat /opt/wpt/.source-revision)\" = \"ece2d7fdc436d4b9a3856877163b07ec15c05354\"",
     "--enable-webtransport-h3",
     "--test-types testharness crashtest",
@@ -1595,7 +1595,7 @@ fn alpine_runtime_uses_native_and_pinned_cross_musl_builders() {
   }
 
   for expected in [
-    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a\"",
+    "rust_builder_image=\"rust:${rust_toolchain_version}-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc\"",
     "rust_target=\"x86_64-unknown-linux-musl\"",
     "rust_target=\"aarch64-unknown-linux-musl\"",
     "rust_target=\"riscv64gc-unknown-linux-musl\"",
@@ -1823,8 +1823,8 @@ fn python_docker_helpers_track_the_supported_alpine_base() {
     let contents = fs::read_to_string(repo_root().join(dockerfile))
       .unwrap_or_else(|error| panic!("{dockerfile} should be readable: {error}"));
     assert!(
-      contents.starts_with("FROM python:3.14-alpine3.24@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72\n"),
-      "{dockerfile} should use the supported Python 3.14 and Alpine 3.24 base"
+      contents.starts_with("FROM python:3.15-alpine3.24@sha256:d44b1254cb92329418d164b22b20d86bbd3869d48e80e09e476531a409a728bb\n"),
+      "{dockerfile} should use the supported Python 3.15 and Alpine 3.24 base"
     );
   }
 }
@@ -2351,7 +2351,10 @@ fn check_workflow_entry_jobs_skip_dependabot() {
 fn person_proof_asset_regeneration_uses_the_frozen_workspace_lockfile() {
   let source_structure = workflow_job_text(&workflow_text(), "source-structure");
   for expected in [
-    "corepack install",
+    "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0",
+    "node-version: 26.12.1",
+    "package-manager-cache: false",
+    "tests/scripts/install-pinned-corepack.sh",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "pnpm --filter @oxibelt/person-proof-ui build",
     "pnpm --filter @oxibelt/person-proof-ui check:openapi",
@@ -3474,7 +3477,7 @@ fn admin_audit_anchor_postgres_harness_is_dual_database_bounded_and_rootless() {
 
   for expected in [
     "set -euo pipefail",
-    "postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873",
+    "postgres:18.6-alpine3.24@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5",
     "local_container=",
     "authority_container=",
     "docker_publish_args=(--publish 127.0.0.1::5432)",
@@ -3963,7 +3966,10 @@ fn node_dependency_admission_is_fail_closed_and_local_on_pull_requests() {
     "name: Node dependency admission",
     "timeout-minutes: 12",
     "contents: read",
-    "corepack install",
+    "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0",
+    "node-version: 26.12.1",
+    "package-manager-cache: false",
+    "tests/scripts/install-pinned-corepack.sh",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "pnpm run dependency-admission \\",
     "--license-report-path \"${LICENSE_REPORT}\" \\",
@@ -4173,8 +4179,10 @@ fn typescript_release_tooling_is_required_fail_closed_and_isolated() {
     DEPENDABOT_ACTOR_CONDITION,
     "contents: read",
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1",
-    "corepack enable",
-    "corepack install",
+    "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0",
+    "node-version: 26.12.1",
+    "package-manager-cache: false",
+    "tests/scripts/install-pinned-corepack.sh",
     "pnpm install --frozen-lockfile --ignore-scripts",
     "pnpm run lint",
     "pnpm run typecheck",
@@ -4530,9 +4538,9 @@ fn kubernetes_immutable_rollout_ci_is_isolated_and_proves_each_pod_revision() {
   }
 
   for expected in [
-    "gateway_api_version=\"v1.6.2\"",
+    "gateway_api_version=\"v1.6.3\"",
     "gateway_api_url=\"https://github.com/kubernetes-sigs/gateway-api/releases/download/${gateway_api_version}/standard-install.yaml\"",
-    "gateway_api_sha256=\"faede450fa178126aba41337737b97d351ebe87d93c910237ce1e072d1ca40d9\"",
+    "gateway_api_sha256=\"356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5\"",
     "kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
     "kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
     "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
@@ -7917,8 +7925,8 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     "RELEASE.2025-10-15T17-29-55Z",
     "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a",
     "45521908307306e925c98d629e1c17d78c8b72b6ee242b1bfb1409f7d8ee5841",
-    "golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd",
-    "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+    "golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c",
+    "alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6",
   ] {
     assert!(
       script.contains(expected),
@@ -7930,7 +7938,7 @@ fn ct_object_store_minio_ci_is_pinned_fail_closed_and_mandatory() {
     );
   }
   for expected in [
-    "alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+    "alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6",
     "--checksum=sha256:01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891",
     "https://github.com/minio/mc/releases/download/RELEASE.2025-08-13T08-35-41Z/mc.linux-amd64.RELEASE.2025-08-13T08-35-41Z",
     "ENTRYPOINT [\"/usr/local/bin/mc\"]",
@@ -8076,7 +8084,7 @@ fn docker_integration_helper_image_job_builds_reusable_artifact() {
     "oxibelt/postgres:ci",
     "redis_source_image=\"valkey/valkey:9.1.2-alpine@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11\"",
     "redis_image=\"oxibelt/valkey:ci\"",
-    "ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e",
+    "ghcr.io/coturn/coturn@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3",
     "oxibelt/coturn:ci",
   ] {
     assert!(
@@ -8221,7 +8229,7 @@ fn docker_integration_jobs_use_prebuilt_helper_images() {
   );
   assert!(
     !workflow.contains(
-      "OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e"
+      "OXIBELT_COTURN_IMAGE: ghcr.io/coturn/coturn@sha256:bbefd3e1fdfdc0d58770fe01b581fd8b00d9f3a5580d00acb77cf719a6bc78e3"
     ),
     "Docker integration jobs should consume coturn through its artifact-preserved local tag"
   );
@@ -8931,7 +8939,7 @@ fn qemu_runtime_emulation_is_confined_to_the_release_smoke_job() {
     "\"no-new-privileges\"",
     "\"logs\", \"--timestamps\", \"--tail\", \"200\"",
     "docker.io/library/alpine:3.24@",
-    "sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+    "sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35",
   ] {
     assert!(
       smoke_helper.contains(expected),
@@ -9057,7 +9065,7 @@ fn docker_image_trivy_scan_covers_built_oxibelt_image_artifacts() {
     "tests/scripts/validate-strict-dataplane-image.py",
     "if: matrix.role.name == 'dataplane-strict'",
     "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0",
-    "version: v0.76.0",
+    "version: v0.76.1",
     "scan-type: image",
     "image-ref: ${{ matrix.role.artifact_prefix }}:alpine-musl-${{ matrix.target.artifact_arch }}",
     "format: json",
@@ -10788,7 +10796,7 @@ fn release_workflows_use_global_vulnerability_gate_with_scoped_publish_permissio
   for expected in [
     "Checkout release revision",
     "Validate immutable release checkout",
-    "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0",
+    "docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0",
     "version: v29.9.2",
     "rootless: true",
     "daemon-config: |",
@@ -11787,16 +11795,16 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
   );
 
   for (job_name, step_name) in [
-    ("resolve", "Enable hash-pinned pnpm"),
+    ("resolve", "Install verified Corepack and pinned pnpm"),
     ("resolve", "Install release-planning dependencies"),
-    ("verify", "Enable hash-pinned pnpm"),
+    ("verify", "Install verified Corepack and pinned pnpm"),
     (
       "verify",
       "Install verifier dependencies without lifecycle scripts",
     ),
     (
       "verify-helm-chart",
-      "Enable hash-pinned pnpm and install verifier dependencies",
+      "Install verified Corepack and pinned pnpm",
     ),
   ] {
     let steps = jobs[job_name]["steps"]
@@ -11946,7 +11954,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "runner: runner",
     "runs-on: ${{ matrix.runner }}",
     "persist-credentials: false",
-    "docker/setup-docker-action@2bf61fb9464cc67f0cbdeabed6aa0380accd1c70 # v5.5.0",
+    "docker/setup-docker-action@7ec28a010822b4626af4874f9448a4b05ac6f3e5 # v5.6.0",
     "version: v29.9.2",
     "rootless: true",
     "daemon-config: |",
@@ -11956,7 +11964,7 @@ fn independent_release_rebuild_is_read_only_rootless_and_producer_independent() 
     "index(\"name=seccomp,profile=builtin\") != null",
     "docker info --format '{{.CgroupDriver}}'",
     "rootless verifier must use no host cgroup resource controller",
-    "moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea",
+    "moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c",
     "docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1",
     "aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1",
     "pnpm install --frozen-lockfile --ignore-scripts",
@@ -13318,7 +13326,7 @@ fn docker_buildx_setup_prepulls_buildkit_image_with_retry() {
   let setup_marker = "\n      - name: Setup Docker Buildx\n        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1";
   let prepull_step_name = "name: Pre-pull Docker BuildKit image";
   let prepull_command = "tests/scripts/retry-docker-pull.sh \"${OXIBELT_BUILDKIT_IMAGE}\"";
-  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea";
+  let pinned_image = "OXIBELT_BUILDKIT_IMAGE: moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c";
   let pinned_driver = "driver-opts: image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
   let setup_count = workflow.matches(setup_marker).count();
 
@@ -13371,7 +13379,8 @@ fn release_buildx_setups_precede_with_pinned_buildkit_retry_pull() {
   let prepull_name = "Pre-pull Docker BuildKit image";
   let prepull_command = "bash \"${RUNNER_TEMP}/oxibelt-release-metadata/helper/retry-docker-pull.sh\" \"${OXIBELT_BUILDKIT_IMAGE}\"";
   let driver_opts = "image=${{ env.OXIBELT_BUILDKIT_IMAGE }}";
-  let pinned_image = "moby/buildkit:buildx-stable-1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea";
+  let pinned_image =
+    "moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c";
   let retry_script = docker_pull_retry_script_text();
   assert!(
     retry_script.contains("retry_command 3 docker pull \"${image}\""),
@@ -13572,11 +13581,11 @@ fn local_amd64_comparator_images_preserve_cpu_targets_and_hardening() {
     "comparator build script should produce deterministic tags and tar names"
   );
   assert!(
-    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.7")
+    nginx_dockerfile.contains("ARG NGINX_VERSION=1.31.8")
       && nginx_dockerfile.contains(
-        "ARG NGINX_SHA256=89ea8a3dc171511f7325043b50e4c036248d9fad5feb7ec809c0b82d5df42c65"
+        "ARG NGINX_SHA256=0652b760b3b772d2ec17b47c2fc15d9a95e6fe35cd5b877eadc1a62d9bc75af1"
       )
-      && script.contains("--build-arg \"NGINX_VERSION=1.31.7\"")
+      && script.contains("--build-arg \"NGINX_VERSION=1.31.8\"")
       && nginx_dockerfile.contains("ARG NGINX_RUNTIME_IMAGE=alpine:3.24")
       && nginx_dockerfile.contains("FROM alpine:3.24 AS builder")
       && nginx_dockerfile.contains("sha256sum -c -")

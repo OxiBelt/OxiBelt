@@ -1,6 +1,6 @@
 # The MinIO source archive, compiler image, and runtime image are all pinned
 # so the CT object-store transport fixture is reproducible and reviewable.
-FROM golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
+FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS build
 
 ARG MINIO_SOURCE_RELEASE=RELEASE.2025-10-15T17-29-55Z
 ARG MINIO_SOURCE_VERSION=2025-10-15T17:29:55Z
@@ -36,7 +36,7 @@ RUN --network=none test "RELEASE.$(printf '%s' "${MINIO_SOURCE_VERSION}" | sed '
     -o /out/minio ./ \
   && /out/minio --version | grep -F "${MINIO_SOURCE_RELEASE}" >/dev/null
 
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6
 
 RUN addgroup --system minio \
   && adduser --system --ingroup minio minio

@@ -2,11 +2,11 @@
 name = "oxibelt-unsafe-harness"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99.1"
 publish = false
 
 [dependencies]
-libc = "0.2.189"
+libc = "0.2.191"
 nix = { version = "0.31.3", default-features = false, features = ["process"] }
 
 [lints]

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "web-transport-quinn"
-version = "0.13.3"
+version = "0.13.4"
 authors = ["Luke Curley"]
 build = false
 autolib = false

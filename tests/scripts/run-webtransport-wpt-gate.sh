@@ -9,7 +9,7 @@ runner="${run_id}-runner"
 initial_direct_runner="${run_id}-initial-direct"
 proxy="${run_id}-proxy"
 direct_retry_runner="${run_id}-direct-retry"
-wpt_image="${OXIBELT_WEBTRANSPORT_WPT_IMAGE:-oxibelt/webtransport-wpt:ece2d7fdc436-chrome155-firefox158-prefs156}"
+wpt_image="${OXIBELT_WEBTRANSPORT_WPT_IMAGE:-oxibelt/webtransport-wpt:ece2d7fdc436-chrome156-firefox158-prefs156}"
 proxy_image="${OXIBELT_DOCKER_IMAGE:-}"
 firefox_image="${OXIBELT_FIREFOX_WEBDRIVER_IMAGE:-oxibelt/firefox-webdriver:158.0.1-geckodriver-0.37.1}"
 artifact_dir="${OXIBELT_TEST_ARTIFACT_DIR:-$(mktemp -d /tmp/oxibelt-webtransport-wpt-artifacts.XXXXXX)}"
@@ -65,7 +65,7 @@ verify_runner() {
   docker exec "${name}" /bin/sh -c \
     'test "$(cat /opt/wpt/.source-revision)" = "ece2d7fdc436d4b9a3856877163b07ec15c05354"'
   docker exec "${name}" /opt/chrome/chrome --version \
-    | grep --fixed-strings -- 'Google Chrome for Testing 155.0.8059.84'
+    | grep --fixed-strings -- 'Google Chrome for Testing 156.0.8078.47'
   docker exec "${name}" /opt/firefox/firefox --version \
     | grep --fixed-strings -- 'Mozilla Firefox 158.0.1'
   docker exec "${name}" /bin/sh -c \

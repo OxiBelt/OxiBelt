@@ -727,7 +727,7 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
               ("quinn", "0.11.12")
                 | ("quinn-proto", "0.11.19")
                 | ("h3", "0.0.8")
-                | ("web-transport-quinn", "0.13.3")
+                | ("web-transport-quinn", "0.13.4")
                 | ("web-transport-proto", "0.6.2")
             ),
           "critical dependency {name}@{version} is not an approved registry or byte-locked vendored package"
@@ -1256,7 +1256,7 @@ fn webtransport_h3_transport_sources_are_byte_locked_and_governed() {
     ("quinn", "0.11.12"),
     ("quinn-proto", "0.11.19"),
     ("h3", "0.0.8"),
-    ("web-transport-quinn", "0.13.3"),
+    ("web-transport-quinn", "0.13.4"),
     ("web-transport-proto", "0.6.2"),
   ] {
     let vendor = format!("source/third_party/{name}");

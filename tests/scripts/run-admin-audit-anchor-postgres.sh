@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
-postgres_image="${OXIBELT_POSTGRES_IMAGE:-postgres:18.6-alpine3.24@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873}"
+postgres_image="${OXIBELT_POSTGRES_IMAGE:-postgres:18.6-alpine3.24@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5}"
 if [[ ! "${postgres_image}" =~ ^[[:alnum:]][[:alnum:]_.:/@-]*$ ]]; then
   echo "OXIBELT_POSTGRES_IMAGE must be one non-option Docker image reference" >&2
   exit 2

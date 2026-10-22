@@ -3914,7 +3914,7 @@ fn local_performance_probe_build_retries_base_pulls_and_build() {
   let script = performance_script_text();
 
   assert!(
-    script.contains("for base_image in rust:1.99.1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f; do")
+    script.contains("for base_image in rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad; do")
       && script.contains("retry_command 3 docker pull \"${base_image}\"")
       && script.contains("retry_command 3 docker build"),
     "local probe image builds should retry Docker Hub base-image pulls and the Docker build"
@@ -3934,7 +3934,7 @@ fn local_external_benchmark_build_retries_base_pulls_and_build() {
   let script = performance_script_text();
 
   assert!(
-    script.contains("for base_image in rust:1.99.1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a debian:trixie@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5 debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f; do")
+    script.contains("for base_image in rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc debian:trixie@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad; do")
       && script.contains("retry_command 3 docker pull \"${base_image}\"")
       && script.contains("retry_command 3 docker build")
       && script.contains("tests/docker/external_benchmarks/Dockerfile"),
