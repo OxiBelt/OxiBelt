@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "409475f8a48c22614fcb23f4b8b37b88aba710b99256134cd8c71d7203fbe64b",
+      "lockfileSha256": "4e0539772d527c4a17981b508682daf15a5e843c8a1d3dfda21a99af5388d0bf",
       "exemptionInventorySha256": "a3a741dff48a1c36313ad0e71dab0ddb6d5a8263b287571467a2e92742454f59",
       "exemptedPackageVersions": 451
     },
@@ -419,7 +419,7 @@
             "0.17.14"
           ],
           "sequoia-openpgp": [
-            "2.4.1"
+            "2.4.2"
           ],
           "sha2": [
             "0.10.9",
@@ -650,7 +650,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:409475f8a48c22614fcb23f4b8b37b88aba710b99256134cd8c71d7203fbe64b",
+      "subject": "Cargo.lock@sha256:4e0539772d527c4a17981b508682daf15a5e843c8a1d3dfda21a99af5388d0bf",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test. The maintainer approved exactly bindgen 0.72/0.73 and prettyplease 0.2/0.3 coexistence through 2026-11-03 under issue #304 for retained OpenSSL and refreshed AWS-LC build-tool requirements; other compatibility lines remain frozen. The maintainer also approved replacing exactly bit-set 0.8/0.9 with 0.8/0.11 and bit-vec 0.8/0.9 with 0.8/0.10 through 2026-11-03 under issue #304 for refreshed LALRPOP; the obsolete itertools 0.14 line is retired.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -663,7 +663,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:409475f8a48c22614fcb23f4b8b37b88aba710b99256134cd8c71d7203fbe64b",
+      "subject": "Cargo.lock@sha256:4e0539772d527c4a17981b508682daf15a5e843c8a1d3dfda21a99af5388d0bf",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -800,17 +800,16 @@
       "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
     },
     {
-      "id": "rust-license-sequoia-openpgp-2.4.1",
+      "id": "rust-license-sequoia-openpgp-2.4.2",
       "ecosystem": "rust",
       "control": "license",
-      "subject": "sequoia-openpgp@2.4.1:LGPL-2.0-or-later",
-      "rationale": "The CLI signing and verification boundary requires Sequoia; approval remains limited to the exact reviewed release.",
+      "subject": "sequoia-openpgp@2.4.2:LGPL-2.0-or-later",
+      "rationale": "The CLI rulepack verification boundary requires Sequoia with the selected OpenSSL backend; approval is limited to this exact reviewed release and remains bounded by the existing expiry.",
       "owner": "@piquark6046",
-      "bootstrap": true,
-      "trackingReference": ".agents/temp/OxiBelt_Medium_Scale_Security_Edge_P0-P2_Improvement_Plan.md#phase-12-strengthen-dependency-admission-and-independent-verification",
-      "reviewedOn": "2026-10-20",
+      "trackingReference": "https://github.com/OxiBelt/OxiBelt/issues/306",
+      "reviewedOn": "2026-10-22",
       "expiresOn": "2026-11-03",
-      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/304"
+      "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/306"
     }
   ]
 }

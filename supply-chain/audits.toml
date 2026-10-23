@@ -1447,6 +1447,12 @@ criteria = "safe-to-deploy"
 delta = "0.3.3 -> 0.3.5"
 notes = "Reviewed the checksum-matched packaged source delta across parser, semantic analysis, rulepack rendering, runtime, and value conversion; all 53 packaged 0.3.5 source files match signed tag 0.3.5. Unsupported string escapes now fail validation, aggregate parser/function/regex admission is bounded, and rulepack placeholder checks advance linearly through string spans. The library has no unsafe code or built-in filesystem, network, or process execution; the packaged CLI reads local input files. OxiBelt uses the parser and analyzer; changed admission limits can reject oversized custom rules, and serde_json arbitrary_precision unifies into the host, so WAF and persisted audit-number compatibility are separately tested."
 
+[[audits.ossl]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "1.5.2 -> 1.5.3"
+notes = "Reviewed the complete checksum-verified source delta and surrounding native ownership for OxiBelt CLI detached public-key rulepack verification through Sequoia with only openssl-sys/rfc9580. Native key contexts retain their key reference; the caller-owned key context remains caller-owned when attached to the legacy digest context. Parameter export copies use unaligned reads and retain owned key/value storage; original native allocations remain separately freed. Signature mismatch and native errors both remain failures. The selected context does not enable new provider configuration or permissive FIPS behavior. Build script and Apache-2.0 license text are unchanged; no selected dependency or ambient capability is added. The selected native OpenSSL 3.5.5 upstream suite passes 45 tests. This audit is bounded to the reviewed consumer and selected verification paths, not standalone library APIs, other feature/provider configurations, or arbitrary downstream reuse; changing those requires a fresh review."
+
 [[audits.password-hash]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
@@ -1860,6 +1866,12 @@ who = "OpenAI Codex"
 criteria = "safe-to-deploy"
 delta = "0.1.29 -> 0.1.30"
 notes = "Reviewed the complete checksum-verified Windows certificate-store delta and unchanged dependencies, MIT license and MSRV. Existing current-user/local-machine opening methods delegate to a default-zero builder, preserving original CertOpenStore arguments and ownership. The UTF-16 NUL-terminated name remains alive through the FFI call, null handles still return the OS error, and the added read-only flag is explicit opt-in. Existing OxiBelt Linux targets do not compile this Windows-only dependency; this is source review, not native Windows execution qualification."
+
+[[audits.sequoia-openpgp]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "2.4.1 -> 2.4.2"
+notes = "Reviewed the complete checksum-verified source delta, manifests, build script, license and selected OpenSSL verification paths. RIPEMD backend support does not expand OxiBelt's detached-signature hash allowlist; valid RIPEMD/SHA224 and text signatures remain rejected by focused CLI regressions. Parser buffers now have a 1024-byte minimum, preventing pathological small-buffer arithmetic without changing OxiBelt's bounded input reads. Direct-key trust-regex handling is not used for local pinned publisher trust. Other selected changes are timing-label ownership and algorithm descriptions; Rust/CNG backend RNG changes remain unselected. The required ossl 1.5.3 update is independently reviewed. No new selected dependency, build script, feature, license, or ambient capability is introduced. Selected OpenSSL upstream suites pass 575 old and 577 new tests, with one ignored in each. This audit covers OxiBelt's CLI rulepack-verification graph; other backends or new consumer use require separate review."
 
 [[audits.serde]]
 who = "OpenAI Codex"

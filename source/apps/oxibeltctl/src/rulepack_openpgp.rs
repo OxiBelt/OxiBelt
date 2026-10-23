@@ -292,6 +292,23 @@ pub(crate) fn test_signed_rulepack_fixture(
   content: &[u8],
   user_id: &str,
 ) -> TestSignedRulepackFixture {
+  test_signed_rulepack_fixture_with_options(
+    content,
+    user_id,
+    CipherSuite::default(),
+    SignatureType::Binary,
+    HashAlgorithm::SHA256,
+  )
+}
+
+#[cfg(test)]
+fn test_signed_rulepack_fixture_with_options(
+  content: &[u8],
+  user_id: &str,
+  cipher_suite: CipherSuite,
+  signature_type: SignatureType,
+  hash: HashAlgorithm,
+) -> TestSignedRulepackFixture {
   use std::io::Write;
 
   use openpgp::armor;
@@ -300,6 +317,7 @@ pub(crate) fn test_signed_rulepack_fixture(
 
   let policy = StandardPolicy::new();
   let (cert, _revocation) = CertBuilder::new()
+    .set_cipher_suite(cipher_suite)
     .add_userid(user_id)
     .add_signing_subkey()
     .generate()
@@ -325,13 +343,17 @@ pub(crate) fn test_signed_rulepack_fixture(
       .kind(armor::Kind::Signature)
       .build()
       .expect("signature armor");
-    let mut signer = Signer::new(message, keypair)
-      .expect("signer")
-      .hash_algo(HashAlgorithm::SHA256)
-      .expect("hash")
-      .detached()
-      .build()
-      .expect("detached signer");
+    let mut signer = Signer::with_template(
+      message,
+      keypair,
+      openpgp::packet::signature::SignatureBuilder::new(signature_type),
+    )
+    .expect("signer")
+    .hash_algo(hash)
+    .expect("hash")
+    .detached()
+    .build()
+    .expect("detached signer");
     signer.write_all(content).expect("sign content");
     signer.finalize().expect("finalize signature");
   }
@@ -352,6 +374,7 @@ pub(crate) fn test_signed_rulepack_fixture(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use openpgp::serialize::Serialize;
 
   fn trust_for(fixture: &TestSignedRulepackFixture) -> RulepackOpenPgpTrust<'_> {
     RulepackOpenPgpTrust {
@@ -359,6 +382,101 @@ mod tests {
       keyring_dirs: &[],
       fingerprints: &[],
     }
+  }
+
+  fn verified_fixture_signature(fixture: &TestSignedRulepackFixture) -> openpgp::packet::Signature {
+    let packets = openpgp::PacketPile::from_bytes(&fixture.signature).expect("signature packet");
+    let openpgp::Packet::Signature(signature) =
+      packets.into_children().next().expect("detached signature")
+    else {
+      panic!("expected detached signature packet");
+    };
+    let cert = Cert::from_file(&fixture.key_file).expect("public certificate");
+    let signing_key = cert
+      .keys()
+      .find(|key| key.key().fingerprint().to_hex().to_ascii_lowercase() == fixture.fingerprint)
+      .expect("signing key");
+    signature
+      .verify_message(signing_key.key(), &fixture.rulepack)
+      .expect("fixture must be cryptographically valid before policy rejection");
+    signature
+  }
+
+  #[test]
+  fn backend_supported_weak_hash_signatures_are_rejected() {
+    for hash in [HashAlgorithm::RipeMD, HashAlgorithm::SHA224] {
+      let fixture = test_signed_rulepack_fixture_with_options(
+        b"rulepack bytes",
+        "Rulepack <rulepack@test>",
+        CipherSuite::RSA2k,
+        SignatureType::Binary,
+        hash,
+      );
+      let signature = verified_fixture_signature(&fixture);
+      assert_eq!(signature.hash_algo(), hash);
+      let error = enforce_signature_policy(&signature).expect_err("hash must remain disallowed");
+      assert!(
+        error
+          .to_string()
+          .contains("unsupported weak hash algorithm")
+      );
+      verify_rulepack_signature(&fixture.signature, &fixture.rulepack, trust_for(&fixture))
+        .expect_err("backend hash support must not expand rulepack admission");
+    }
+  }
+
+  #[test]
+  fn text_signature_is_rejected_even_when_cryptographically_valid() {
+    let fixture = test_signed_rulepack_fixture_with_options(
+      b"rulepack bytes",
+      "Rulepack <rulepack@test>",
+      CipherSuite::default(),
+      SignatureType::Text,
+      HashAlgorithm::SHA256,
+    );
+    let signature = verified_fixture_signature(&fixture);
+    assert_eq!(signature.typ(), SignatureType::Text);
+    let error =
+      verify_rulepack_signature(&fixture.signature, &fixture.rulepack, trust_for(&fixture))
+        .expect_err("text signatures must not authorize rulepack bytes");
+    assert!(error.to_string().contains("binary detached signature"));
+  }
+
+  #[test]
+  fn malformed_and_truncated_detached_packets_fail_closed() {
+    let fixture = test_signed_rulepack_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
+    let signature = verified_fixture_signature(&fixture);
+    let mut packet = Vec::new();
+    openpgp::Packet::Signature(signature)
+      .serialize(&mut packet)
+      .expect("serialize signature packet");
+    for length in [1, packet.len() / 2, packet.len() - 1] {
+      verify_rulepack_signature(&packet[..length], &fixture.rulepack, trust_for(&fixture))
+        .expect_err("incomplete detached signature packet must fail");
+    }
+    // New-format signature packet claims a 16-byte body but contains only its version.
+    let incomplete_signature = [0xc2, 0xff, 0, 0, 0, 16, 4];
+    for malformed in [&[][..], &incomplete_signature[..]] {
+      verify_rulepack_signature(malformed, &fixture.rulepack, trust_for(&fixture))
+        .expect_err("malformed detached signature must fail");
+    }
+  }
+
+  #[test]
+  fn incomplete_public_key_packet_fails_closed() {
+    let fixture = test_signed_rulepack_fixture(b"rulepack bytes", "Rulepack <rulepack@test>");
+    // New-format public-key packet claims a 16-byte body but contains only its version.
+    // Unlike a certificate prefix ending at a packet boundary, this cannot be a valid key.
+    std::fs::write(&fixture.key_file, [0xc6, 0xff, 0, 0, 0, 16, 4])
+      .expect("write incomplete public-key packet");
+    let error =
+      verify_rulepack_signature(&fixture.signature, &fixture.rulepack, trust_for(&fixture))
+        .expect_err("incomplete trusted public key must fail");
+    assert!(
+      error
+        .to_string()
+        .contains("failed to parse OpenPGP public key")
+    );
   }
 
   #[test]

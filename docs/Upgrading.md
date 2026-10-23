@@ -477,6 +477,20 @@ oxibelt --check --config source/config/oxibelt.toml
 
 ## Dependency maintenance
 
+The CLI rulepack verifier updates Sequoia OpenPGP to 2.4.2 together with its
+required ossl 1.5.3 OpenSSL backend. Rebuild the tools and standalone images
+from the same revision. Trusted local public keys, signing-key fingerprint
+pins, binary detached signatures, the permitted signature hashes, and HTTP
+rulepack signature requirements retain their existing contracts. The added
+backend support for RIPEMD does not permit RIPEMD rulepack signatures.
+
+This update changes no configuration, native schema, Admin API, or persisted
+state. Validate existing signed rulepacks with the replacement CLI before
+rollout. Rollback restores the previous complete tools or standalone image;
+no state conversion or irreversible step is required. Qualification applies
+to OxiBelt's selected OpenSSL verification graph, not every upstream backend,
+provider configuration, or newly exposed library API.
+
 The September 2026 dependency refresh uses Rust 1.98.1 and pnpm 12.4.1 while
 retaining Rust's 1.98 minimum and Node 24 LTS. Use the package manager and its
 integrity pin from `package.json`; pnpm 12 records its managed packages in a
