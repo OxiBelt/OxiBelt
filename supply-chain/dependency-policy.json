@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "4e0539772d527c4a17981b508682daf15a5e843c8a1d3dfda21a99af5388d0bf",
+      "lockfileSha256": "cba541fcd5a507218fad6bcf775ab4c739bbf346bbae62fa9c09cd4620b552b7",
       "exemptionInventorySha256": "a3a741dff48a1c36313ad0e71dab0ddb6d5a8263b287571467a2e92742454f59",
       "exemptedPackageVersions": 451
     },
@@ -650,7 +650,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:4e0539772d527c4a17981b508682daf15a5e843c8a1d3dfda21a99af5388d0bf",
+      "subject": "Cargo.lock@sha256:cba541fcd5a507218fad6bcf775ab4c739bbf346bbae62fa9c09cd4620b552b7",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test. The maintainer approved exactly bindgen 0.72/0.73 and prettyplease 0.2/0.3 coexistence through 2026-11-03 under issue #304 for retained OpenSSL and refreshed AWS-LC build-tool requirements; other compatibility lines remain frozen. The maintainer also approved replacing exactly bit-set 0.8/0.9 with 0.8/0.11 and bit-vec 0.8/0.9 with 0.8/0.10 through 2026-11-03 under issue #304 for refreshed LALRPOP; the obsolete itertools 0.14 line is retired.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -663,7 +663,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:4e0539772d527c4a17981b508682daf15a5e843c8a1d3dfda21a99af5388d0bf",
+      "subject": "Cargo.lock@sha256:cba541fcd5a507218fad6bcf775ab4c739bbf346bbae62fa9c09cd4620b552b7",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "@piquark6046",
       "bootstrap": true,

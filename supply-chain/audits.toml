@@ -463,6 +463,12 @@ criteria = "safe-to-deploy"
 delta = "0.4.2 -> 0.4.3"
 notes = "Reviewed the complete checksum-matched source and manifest delta. Signed casts retain bit identity, bool/u8 conversion helpers become const with the existing black_box identity barrier, and deprecated variable-time aliases delegate to those helpers. Constant-time arithmetic primitives and dependencies remain unchanged apart from narrowing the existing optional subtle minimum to2.6. Rust1.87 remains below the workspace floor. No unsafe code or build script is added. All149unit and40property tests pass; no universal compiler timing guarantee is claimed."
 
+[[audits.ctutils]]
+who = "OpenAI Codex"
+criteria = "safe-to-deploy"
+delta = "0.4.3 -> 0.4.5"
+notes = "Reviewed the complete registry-checksum-verified source and manifest delta with independent correctness review. Mask generation now passes through the existing black_box barrier; 32-bit u128 comparisons compose opaque half-width predicates, and Thumb-1 comparison/composition barriers preserve boolean semantics. The additive primitives module has no direct consumer in the selected OxiBelt graph. Dependencies, features, licenses and Rust 1.87 MSRV are unchanged; the crate still forbids unsafe code and has no build script or external side effects. All 157 unit, 6 primitive and 43 property tests pass on native AMD64 and emulated i686/ARM64; optimized selected-feature suites also pass on AMD64/i686. Rust 1.99.1 optimized mask, comparison, composition and byte-equality wrappers were independently reviewed on AMD64, ARM64, RISC-V64 and i686: observed branches and addressing depend only on public lengths/counters. This is bounded generated-code evidence, not a universal compiler or hardware timing guarantee. RISC-V functional execution remains unqualified because the local target lacks libc. OxiBelt provider equivalence and valid/tampered AEAD/HMAC tests pass."
+
 [[audits.data-encoding]]
 who = "OpenAI Codex"
 criteria = "safe-to-deploy"
