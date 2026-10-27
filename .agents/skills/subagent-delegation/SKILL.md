@@ -31,7 +31,7 @@ Do not choose a more expensive model merely because the overall project is large
 
 ### 1. Exploration Subagent
 
-**Default:** `gpt-6.1-sol`, reasoning effort `medium`
+**Default:** `gpt-6.1-terra`, reasoning effort `medium`
 
 Use for read-heavy repository investigation where the expected output is evidence rather than a final architectural decision.
 
@@ -54,7 +54,7 @@ Expected output:
 - Uncertainties or conflicting evidence.
 - A compact summary suitable for consumption by another agent.
 
-#### Escalate exploration to `gpt-6.1-sol high` when:
+#### Escalate exploration to `gpt-6.1-terra high` when:
 
 - The repository structure is highly indirect or generated.
 - Control flow crosses asynchronous, concurrent, macro-generated, FFI, unsafe, or protocol state-machine boundaries.
@@ -80,7 +80,7 @@ Examples:
 
 ### 2. Correctness and Security Subagent
 
-**Default:** `gpt-6.1-sol`, reasoning effort `high`
+**Default:** `gpt-6.1-terra`, reasoning effort `high`
 
 Use when delegated work requires adversarial thinking, invariant checking, semantic validation, or reasoning about failure modes.
 
@@ -152,7 +152,7 @@ Reasoning-effort policy for Daybreak Blue subagents:
 
 Do not infer that Daybreak Blue is always more accurate than Terra or Sol for every security task. Route based on the actual security question, available evidence, cost, and validation needs. For example, a large exhaustive call-site inventory should still go to Luna, while a nuanced authorization bypass investigation may justify Daybreak Blue `high` or `xhigh`.
 
-If `gpt-daybreak-blue-latest` is unavailable, unsupported, or rejected by the active runtime, fall back to `gpt-6.1-sol high` for ordinary security review and escalate to `gpt-6.1 high/xhigh` only when the existing escalation rules justify it.
+If `gpt-daybreak-blue-latest` is unavailable, unsupported, or rejected by the active runtime, fall back to `gpt-6-sol high` for ordinary security review and escalate to `gpt-6-sol high/xhigh` only when the existing escalation rules justify it.
 
 The availability of Daybreak Blue must **not** be used as a reason to widen security scope automatically. In particular, do not turn release preparation into a monolithic full-repository review merely because a stronger security-capable model is available. Apply the Security Review Scope Policy below unchanged.
 
@@ -641,9 +641,9 @@ Prefer approximately:
 |---|---|
 | Precise enumeration / repetitive edits | gpt-6 Luna high/max |
 | Tests, logs, docs, evidence processing | gpt-6 Luna high/max |
-| General repository exploration | gpt-6.1-sol medium |
-| Semantic diagnosis | gpt-6.1-sol high |
-| Correctness / ordinary security review | gpt-6.1-sol high |
+| General repository exploration | gpt-6.1-terra medium |
+| Semantic diagnosis | gpt-6.1-terra high |
+| Correctness / ordinary security review | gpt-6.1-terra high |
 | Authorized defensive security investigation / review | `gpt-daybreak-blue-latest` high; `xhigh` only when justified |
 | Complex cross-agent integration | `gpt-6.1-sol` high |
 | Exceptional high-risk integration | `gpt-6.1-sol` xhigh |
