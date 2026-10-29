@@ -36,7 +36,7 @@ RUN --network=none test "RELEASE.$(printf '%s' "${MINIO_SOURCE_VERSION}" | sed '
     -o /out/minio ./ \
   && /out/minio --version | grep -F "${MINIO_SOURCE_RELEASE}" >/dev/null
 
-FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 RUN addgroup --system minio \
   && adduser --system --ingroup minio minio
