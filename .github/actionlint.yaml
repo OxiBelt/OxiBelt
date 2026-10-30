@@ -1,3 +1,8 @@
-self-hosted-runner:
-  labels:
-    - ubuntu-24.04-riscv
+lint:
+  rules:
+    correctness:
+      runner-label:
+        level: default
+        options:
+          labels:
+            - ubuntu-24.04-riscv
