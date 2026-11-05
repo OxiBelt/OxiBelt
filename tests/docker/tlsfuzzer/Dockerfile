@@ -1,4 +1,4 @@
-FROM python:3.15-alpine3.24@sha256:d44b1254cb92329418d164b22b20d86bbd3869d48e80e09e476531a409a728bb
+FROM python:3.15-alpine3.24@sha256:20a82dbc2783112ddb91d1534603f802d222a3e63e593cd002eb2ac534e70211
 
 # The runner assembles these trees from the exact commits in
 # tests/scripts/run-tls13-tlsfuzzer.sh before building this image. No pip or
