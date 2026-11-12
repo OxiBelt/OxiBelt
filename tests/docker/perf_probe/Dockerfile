@@ -1,4 +1,4 @@
-FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS builder
+FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential clang cmake perl pkg-config && \
