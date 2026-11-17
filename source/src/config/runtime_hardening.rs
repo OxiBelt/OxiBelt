@@ -9,66 +9,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 const MAX_SECCOMP_PROFILE_IDENTITY_LEN: usize = 128;
 const MAX_EXPECTED_WRITABLE_PATHS: usize = 64;
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeDirectH1IoMode {
-  #[default]
-  Auto,
-  TokioHyper,
-  Compio,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeMainRuntimeMode {
-  Auto,
-  #[default]
-  HybridCompio,
-  /// Compatibility input for pre-topology configurations.
-  Compio,
-  TokioHyper,
-}
-
-impl RuntimeMainRuntimeMode {
-  /// Returns the canonical topology preset without changing legacy behavior.
-  pub const fn canonical(self) -> Self {
-    match self {
-      Self::Compio => Self::HybridCompio,
-      mode => mode,
-    }
-  }
-
-  pub const fn is_legacy_compio_alias(self) -> bool {
-    matches!(self, Self::Compio)
-  }
-
-  pub const fn as_str(self) -> &'static str {
-    match self {
-      Self::Auto => "auto",
-      Self::HybridCompio => "hybrid_compio",
-      Self::Compio => "compio",
-      Self::TokioHyper => "tokio_hyper",
-    }
-  }
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeTopologyPolicy {
-  #[default]
-  AllowFallback,
-  RequireExact,
-}
-
-impl RuntimeTopologyPolicy {
-  pub const fn as_str(self) -> &'static str {
-    match self {
-      Self::AllowFallback => "allow_fallback",
-      Self::RequireExact => "require_exact",
-    }
-  }
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct RuntimeHardeningConfig {
   #[serde(default)]

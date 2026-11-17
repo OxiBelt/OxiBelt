@@ -49,4 +49,17 @@ mod tests {
     };
     assert_eq!(args.epoch, 1);
   }
+
+  #[test]
+  fn defaults_to_current_schema_epoch_two() {
+    let cli = Cli::try_parse_from(["oxibeltctl", "config", "schema"])
+      .expect("schema command should use the current epoch by default");
+    let Command::Config(ConfigCommand {
+      command: ConfigSubcommand::Schema(args),
+    }) = cli.command
+    else {
+      panic!("expected schema command");
+    };
+    assert_eq!(args.epoch, 2);
+  }
 }

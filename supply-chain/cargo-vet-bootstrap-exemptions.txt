@@ -19,7 +19,6 @@ anstyle@1.0.14:safe-to-deploy
 arbitrary@1.4.2:safe-to-deploy
 arc-swap@1.9.2:safe-to-deploy
 argon2@0.5.3:safe-to-deploy
-arrayvec@0.7.8:safe-to-deploy
 ascii-canvas@4.0.0:safe-to-deploy
 async-broadcast@0.7.2:safe-to-deploy
 async-compression@0.4.42:safe-to-deploy
@@ -61,17 +60,8 @@ cmake@0.1.58:safe-to-deploy
 cmov@0.5.4:safe-to-deploy
 colorchoice@1.0.5:safe-to-deploy
 combine@4.6.7:safe-to-deploy
-compio-buf@0.8.3:safe-to-deploy
-compio-driver@0.12.5:safe-to-deploy
-compio-executor@0.1.4:safe-to-deploy
-compio-io@0.10.1:safe-to-deploy
-compio-log@0.2.1:safe-to-deploy
-compio-runtime@0.12.6:safe-to-deploy
-compio-send-wrapper@0.7.2:safe-to-deploy
-compio@0.19.2:safe-to-deploy
 compression-codecs@0.4.38:safe-to-deploy
 compression-core@0.4.32:safe-to-deploy
-concurrent-queue@2.5.0:safe-to-deploy
 const-oid@0.10.2:safe-to-deploy
 const-oid@0.9.6:safe-to-deploy
 core-foundation@0.10.1:safe-to-deploy
@@ -129,7 +119,6 @@ fixedbitset@0.5.7:safe-to-deploy
 flagset@0.4.7:safe-to-deploy
 flate2@1.1.9:safe-to-deploy
 fluent-uri@0.4.1:safe-to-deploy
-flume@0.12.0:safe-to-deploy
 fraction@0.16.0:safe-to-deploy
 fs_extra@1.3.0:safe-to-deploy
 futures-intrusive@0.5.0:safe-to-deploy
@@ -152,7 +141,6 @@ half@2.7.1:safe-to-run
 hashbrown@0.15.5:safe-to-deploy
 hashlink@0.11.1:safe-to-deploy
 heck@0.5.0:safe-to-deploy
-hermit-abi@0.5.2:safe-to-deploy
 hkdf@0.13.0:safe-to-deploy
 hmac@0.13.0:safe-to-deploy
 hostname@0.4.2:safe-to-deploy
@@ -179,7 +167,6 @@ idna_adapter@1.2.2:safe-to-deploy
 indexmap@2.14.0:safe-to-deploy
 inout@0.1.4:safe-to-deploy
 inout@0.2.2:safe-to-deploy
-io-uring@0.7.14:safe-to-deploy
 ipnet@2.12.1:safe-to-deploy
 is_terminal_polyfill@1.70.2:safe-to-deploy
 itertools@0.13.0:safe-to-deploy
@@ -211,7 +198,6 @@ libm@0.2.16:safe-to-deploy
 linktime-proc-macro@0.2.0:safe-to-deploy
 linux-raw-sys@0.12.1:safe-to-deploy
 litemap@0.8.3:safe-to-deploy
-local-event@0.1.2:safe-to-deploy
 lock_api@0.4.14:safe-to-deploy
 log@0.4.33:safe-to-deploy
 loom@0.7.2:safe-to-deploy
@@ -226,7 +212,6 @@ mime@0.3.17:safe-to-deploy
 minimal-lexical@0.2.1:safe-to-deploy
 miniz_oxide@0.8.9:safe-to-deploy
 mio@1.2.2:safe-to-deploy
-mod_use@0.2.3:safe-to-deploy
 new_debug_unreachable@1.0.6:safe-to-deploy
 nix@0.31.3:safe-to-deploy
 nohash-hasher@0.2.0:safe-to-deploy
@@ -251,7 +236,6 @@ parking@2.2.1:safe-to-deploy
 parking_lot@0.12.5:safe-to-deploy
 parking_lot_core@0.9.12:safe-to-deploy
 password-hash@0.5.0:safe-to-deploy
-pastey@0.2.3:safe-to-deploy
 pem-rfc7468@0.7.0:safe-to-deploy
 pem-rfc7468@1.0.0:safe-to-deploy
 pem@3.0.6:safe-to-deploy
@@ -263,7 +247,6 @@ pin-project-lite@0.2.17:safe-to-deploy
 pin-project@1.1.13:safe-to-deploy
 pin-utils@0.1.0:safe-to-deploy
 pkg-config@0.3.34:safe-to-deploy
-polling@3.11.0:safe-to-deploy
 poly1305@0.9.1:safe-to-deploy
 portable-atomic-util@0.2.7:safe-to-deploy
 potential_utf@0.1.6:safe-to-deploy
@@ -328,7 +311,6 @@ simd_cesu8@1.2.0:safe-to-deploy
 simdutf8@0.1.5:safe-to-deploy
 siphasher@1.0.3:safe-to-deploy
 slab@0.4.12:safe-to-deploy
-slotmap@1.1.1:safe-to-deploy
 socket2@0.6.5:safe-to-deploy
 spin@0.10.1:safe-to-deploy
 spin@0.9.9:safe-to-deploy
@@ -347,7 +329,6 @@ syn@2.0.119:safe-to-deploy
 sync_wrapper@1.0.2:safe-to-deploy
 tempfile@3.27.0:safe-to-deploy
 term@1.2.1:safe-to-deploy
-thin-cell@0.2.1:safe-to-deploy
 thiserror-impl@1.0.69:safe-to-deploy
 thiserror@1.0.69:safe-to-deploy
 thread_local@1.1.10:safe-to-deploy

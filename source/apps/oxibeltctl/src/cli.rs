@@ -233,7 +233,7 @@ pub(crate) enum ConfigSubcommand {
 
 #[derive(Debug, Args)]
 pub(crate) struct ConfigSchemaArgs {
-  #[arg(long, default_value_t = 1)]
+  #[arg(long, default_value_t = 2)]
   pub(crate) epoch: u32,
 }
 
@@ -273,9 +273,9 @@ pub(crate) struct ConfigExplainArgs {
 #[derive(Debug, Args)]
 pub(crate) struct ConfigMigrateArgs {
   pub(crate) file: PathBuf,
-  #[arg(long = "from")]
+  #[arg(long = "from", visible_alias = "from-epoch")]
   pub(crate) from_epoch: u32,
-  #[arg(long = "to")]
+  #[arg(long = "to", visible_alias = "to-epoch")]
   pub(crate) to_epoch: u32,
   #[arg(long, value_name = "DIR")]
   pub(crate) output_dir: Option<PathBuf>,

@@ -37,7 +37,7 @@ EXECUTION_SCOPES = {
     "netport-switcher",
     "netport-switcher+dataplane",
 }
-RUNTIMES = {"none", "tokio", "compio"}
+RUNTIMES = {"none", "tokio"}
 HARDENED_OCI_BOOTSTRAP_SYSCALLS = {
     "arch_prctl",
     "execve",
@@ -184,7 +184,7 @@ def validate(seccomp_dir: Path) -> int:
         profile_path = seccomp_dir / file_name
         require(profile_path.is_file(), f"{identity} profile file is missing: {file_name}")
         profile, names, raw = validate_profile(profile_path)
-        if entry["runtime"] in {"tokio", "compio"}:
+        if entry["runtime"] == "tokio":
             missing_bootstrap = sorted(HARDENED_OCI_BOOTSTRAP_SYSCALLS.difference(names))
             require(
                 not missing_bootstrap,

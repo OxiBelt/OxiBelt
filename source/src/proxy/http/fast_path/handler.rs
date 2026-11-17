@@ -638,14 +638,11 @@ impl PlainProxyFastPath {
         }
         warn!(error = %error, upstream = %upstream.name, "upstream fast-path request failed");
         let message = error.to_string();
-        let (code, status) =
-          direct_h1::direct_h1_upstream_error_response(&error).unwrap_or_else(|| {
-            if message.contains("timed out") {
-              ("read_timeout", StatusCode::GATEWAY_TIMEOUT)
-            } else {
-              ("connect_error", StatusCode::BAD_GATEWAY)
-            }
-          });
+        let (code, status) = if message.contains("timed out") {
+          ("read_timeout", StatusCode::GATEWAY_TIMEOUT)
+        } else {
+          ("connect_error", StatusCode::BAD_GATEWAY)
+        };
         if let Some(upstream_first_byte_time_ms) = upstream_started_at.map(elapsed_ms) {
           access_log.set_upstream_first_byte_time_ms(upstream_first_byte_time_ms);
         }

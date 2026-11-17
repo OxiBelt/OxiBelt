@@ -204,6 +204,7 @@ fn remove_empty_compat_tables(root: &mut toml::Value) {
 
 pub(super) fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<()> {
   reject_removed_access_log_config(value)?;
+  reject_removed_runtime_config(value)?;
   let strict = value
     .get("config")
     .and_then(|config| config.get("strict_unknown_fields"))
@@ -223,6 +224,83 @@ pub(super) fn validate_merged_toml_shape(value: &toml::Value) -> anyhow::Result<
     );
   }
   Ok(())
+}
+
+/// Reject runtime settings whose behavior no longer exists after Compio removal.
+/// This check is deliberately independent of `strict_unknown_fields`.
+pub(super) fn reject_removed_runtime_config(value: &toml::Value) -> anyhow::Result<()> {
+  let mut removed = removed_runtime_config_fields(value);
+  for path in &removed {
+    if let Some(field) = lookup_toml_path(value, &path.split('.').collect::<Vec<_>>()) {
+      validate_removed_runtime_value(path, field)?;
+    }
+  }
+  if !removed.is_empty() {
+    removed.sort_unstable();
+    bail!(
+      "configuration contains removed field(s): {}",
+      removed.join(", ")
+    );
+  }
+  Ok(())
+}
+
+pub(super) fn removed_runtime_config_fields(value: &toml::Value) -> Vec<&'static str> {
+  [
+    "runtime.main_runtime",
+    "runtime.direct_h1_io",
+    "runtime.topology_policy",
+    "runtime.workers.compio_direct_h1",
+    "runtime.worker_multipliers.compio_direct_h1",
+  ]
+  .into_iter()
+  .filter(|path| lookup_toml_path(value, &path.split('.').collect::<Vec<_>>()).is_some())
+  .collect()
+}
+
+fn validate_removed_runtime_value(path: &str, value: &toml::Value) -> anyhow::Result<()> {
+  match path {
+    "runtime.main_runtime" => validate_legacy_enum(
+      path,
+      value,
+      &["auto", "hybrid_compio", "tokio_hyper", "compio"],
+    ),
+    "runtime.direct_h1_io" => validate_legacy_enum(path, value, &["auto", "tokio_hyper", "compio"]),
+    "runtime.topology_policy" => {
+      validate_legacy_enum(path, value, &["allow_fallback", "require_exact"])
+    }
+    "runtime.workers.compio_direct_h1" => validate_legacy_worker_count(path, value),
+    "runtime.worker_multipliers.compio_direct_h1" => {
+      let multiplier = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|n| n as f64));
+      if multiplier.is_some_and(|n| n.is_finite() && n > 0.0) {
+        Ok(())
+      } else {
+        bail!("{path} must be a finite number greater than 0")
+      }
+    }
+    _ => Ok(()),
+  }
+}
+
+fn validate_legacy_enum(path: &str, value: &toml::Value, accepted: &[&str]) -> anyhow::Result<()> {
+  if value
+    .as_str()
+    .is_some_and(|candidate| accepted.contains(&candidate))
+  {
+    Ok(())
+  } else {
+    bail!("{path} has an invalid legacy enum value")
+  }
+}
+
+fn validate_legacy_worker_count(path: &str, value: &toml::Value) -> anyhow::Result<()> {
+  if value.as_str() == Some("auto") || value.as_integer().is_some_and(|count| count > 0) {
+    Ok(())
+  } else {
+    bail!("{path} must be a positive integer or \"auto\"")
+  }
 }
 pub(super) fn reject_removed_access_log_config(value: &toml::Value) -> anyhow::Result<()> {
   if value
@@ -291,6 +369,48 @@ pub(super) fn allowed_config_keys(path: &str) -> Option<BTreeSet<&'static str>> 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn removed_runtime_fields_fail_even_when_unknown_fields_are_permissive() {
+    let removed: toml::Value = toml::from_str(
+      r#"
+[config]
+strict_unknown_fields = false
+[runtime]
+direct_h1_io = "auto"
+"#,
+    )
+    .unwrap();
+    let error = validate_merged_toml_shape(&removed).expect_err("removed field must fail");
+    assert!(error.to_string().contains("runtime.direct_h1_io"));
+
+    let unknown: toml::Value = toml::from_str(
+      r#"
+[config]
+strict_unknown_fields = false
+unrecognized = true
+"#,
+    )
+    .unwrap();
+    validate_merged_toml_shape(&unknown).expect("ordinary unknown remains permissive");
+  }
+
+  #[test]
+  fn validates_removed_runtime_values_before_rejecting_them() {
+    let invalid: toml::Value = toml::from_str(
+      r#"
+[runtime]
+worker_multipliers = { compio_direct_h1 = 0.0 }
+"#,
+    )
+    .unwrap();
+    let error = reject_removed_runtime_config(&invalid).expect_err("invalid removed value");
+    assert!(
+      error
+        .to_string()
+        .contains("runtime.worker_multipliers.compio_direct_h1")
+    );
+  }
 
   #[test]
   fn legacy_quic_resolution_leaves_normalize_to_the_canonical_policy() {

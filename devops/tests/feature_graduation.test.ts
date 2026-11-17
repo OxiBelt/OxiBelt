@@ -134,8 +134,8 @@ test('rejects unknown properties, unsupported platforms, and unsupported rows wi
   Assert.throws(() => ValidateFeatureGraduationPolicyObject(Unknown, Schema), /unknown property ignored/)
 
   const UnsupportedPlatform = Policy()
-  UnsupportedPlatform.features[3].qualifiedPlatforms = ['linux/amd64', 'linux/arm64']
-  Assert.throws(() => ValidateFeatureGraduationPolicyObject(UnsupportedPlatform, Schema), /qualified platforms must be exactly/)
+  Object.assign(UnsupportedPlatform.features[0], { qualifiedPlatforms: ['linux/riscv64'] })
+  Assert.throws(() => ValidateFeatureGraduationPolicyObject(UnsupportedPlatform, Schema), /must be one of/)
 
   const MissingNativePlatform = Policy()
   MissingNativePlatform.features[0].qualifiedPlatforms = ['linux/amd64']

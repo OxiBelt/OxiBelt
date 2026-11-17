@@ -1,6 +1,5 @@
 use http::StatusCode;
 
-use super::fast_path::labels::{DirectH1ResponseProtocolFailure, FastPathMetricProtocol};
 use super::*;
 
 #[test]
@@ -194,26 +193,6 @@ fn prometheus_output_includes_direct_h1_pool_events() {
 }
 
 #[test]
-fn prometheus_output_includes_direct_h1_response_protocol_failures() {
-  let metrics = Metrics::new();
-  metrics.record_direct_h1_response_protocol_failure_id(
-    FastPathMetricProtocol::H3,
-    DirectH1ResponseProtocolFailure::InvalidTransferCodingSequence,
-  );
-
-  let body = metrics.prometheus(
-    &MetricsConfig::default(),
-    CacheStats::default(),
-    TlsServerSessionStorageStats::default(),
-  );
-
-  assert!(body.contains(
-    "oxibelt_http_direct_h1_response_protocol_failures_total{protocol=\"h3\",reason=\"invalid_transfer_coding_sequence\"} 1"
-  ));
-  assert!(!body.contains("reason=\"raw upstream bytes\""));
-}
-
-#[test]
 fn prometheus_output_includes_direct_h2_pool_events() {
   let metrics = Metrics::new();
   for event in [
@@ -271,7 +250,7 @@ fn prometheus_output_includes_direct_h2_pool_events() {
 fn prometheus_output_includes_direct_h1_io_backend_evidence() {
   let metrics = Metrics::new();
   metrics.record_direct_h1_io_backend("tokio_hyper", "h2", "selected");
-  metrics.record_direct_h1_io_backend("compio", "h2", "fallback");
+  metrics.record_direct_h1_io_backend("removed_backend", "h2", "fallback");
   metrics.record_direct_h1_io_backend("unknown", "h2", "selected");
 
   let body = metrics.prometheus(
@@ -283,9 +262,13 @@ fn prometheus_output_includes_direct_h1_io_backend_evidence() {
   assert!(body.contains(
     "oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h2\",outcome=\"selected\"} 1"
   ));
-  assert!(body.contains(
-    "oxibelt_http_direct_h1_io_backend_total{backend=\"compio\",protocol=\"h2\",outcome=\"fallback\"} 1"
-  ));
+  assert!(!body.contains("backend=\"removed_backend\""));
+  assert!(
+    body
+      .lines()
+      .filter(|line| line.starts_with("oxibelt_http_direct_h1_io_backend_total{"))
+      .all(|line| !line.contains("outcome=\"fallback\""))
+  );
   assert!(!body.contains("backend=\"unknown\""));
 }
 

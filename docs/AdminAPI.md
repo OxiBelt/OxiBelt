@@ -52,8 +52,8 @@ tracked-tree state (`clean`, `dirty`, or `unknown`), and build kind
 (`official_release`, `tagged_development`, `git_development`, or
 `source_archive`). `package_version` is the effective OxiBelt version and is
 never inferred from Cargo's private `0.0.0` workspace sentinel. Runtime
-snapshot format version `2`, runtime-introspection format version `3`, and
-support-bundle format version `3` carry the same `package_version`, `source_revision`,
+snapshot format version `2`, runtime-introspection format version `4`, and
+support-bundle format version `4` carry the same `package_version`, `source_revision`,
 `source_ref`, `source_dirty`, and `build_kind` metadata together with the
 resolved runtime topology and bounded hardening evidence. The
 unauthenticated health endpoints intentionally omit build identity; use these
@@ -70,14 +70,11 @@ not bearer secrets.
 ## Runtime topology and capability resolution
 
 Authenticated runtime snapshot, runtime introspection, and redacted support
-bundle responses expose a shared version-`2` `runtime_topology` object. It
-reports the requested and resolved main-runtime presets, `topology_policy`,
-resolution outcome and fixed reason, subsystem owners, worker allocations,
-blocking strategy, compatibility boundaries, and requested, resolved, and
-active direct-H1 state. A resolved `hybrid_compio` preset truthfully reports a
-Compio bootstrap boundary and Tokio ownership of listener, general HTTP,
-HTTP/3 and QUIC, DNS/discovery, timer, and background/control work; it reports
-Compio direct-H1 ownership only when that experimental service is active.
+bundle responses expose a shared version-`3` `runtime_topology` object. It
+reports Tokio/Hyper ownership, worker allocations and applicability, required
+capability outcomes, blocking strategy, and direct-H1 state. Embedded callers
+are reported as externally managed. Compio driver and compatibility-boundary
+fields are removed. Update consumers of older report versions before rollout.
 
 - `GET /admin/v1/runtime/snapshot?redact=true` requires
   `runtime:ReadSnapshot` on `runtime:snapshot/current` and returns the active
@@ -86,11 +83,11 @@ Compio direct-H1 ownership only when that experimental service is active.
   `runtime:ReadIntrospection` on `runtime:introspection/current` and adds live
   connection, request, stream, tunnel, and flow counters, including active
   TURN UDP clients and relay allocations. Runtime-introspection format version
-  `3` adds those two aggregate, redacted counts.
+  `4` retains those aggregate, redacted counts and removes obsolete runtime fields.
 - `GET /admin/v1/diagnostics/support-bundle?redact=true` requires
   `diagnostics:ReadSupportBundle` and embeds the same active-generation
   topology.
-- `GET /admin/v1/config/explain` uses config-report format version `3` and
+- `GET /admin/v1/config/explain` uses config-report format version `4` and
   reports the active topology with `basis = "active"`; offline config explain
   uses `basis = "preflight"` and does not claim activation.
 

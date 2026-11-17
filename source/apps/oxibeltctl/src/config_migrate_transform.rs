@@ -72,6 +72,149 @@ pub(crate) fn transform_document(
   }
 }
 
+/// Checks the legacy worker combination before migration drops its fields.
+/// The input is the production loader's merged include graph, so canonical
+/// settings override legacy fallback values exactly as they did in epoch 1.
+pub(crate) fn validate_epoch1_runtime_workers(document: &toml::Value) -> anyhow::Result<()> {
+  let lookup = |path: &[&str]| path.iter().try_fold(document, |value, key| value.get(*key));
+  let workers = lookup(&["runtime", "workers", "compio_direct_h1"])
+    .or_else(|| lookup(&["runtime", "worker_threads"]));
+  let automatic = match workers {
+    None => true,
+    Some(value) if value.as_str() == Some("auto") => true,
+    Some(value)
+      if value
+        .as_integer()
+        .is_some_and(|n| n > 0 && usize::try_from(n).is_ok()) =>
+    {
+      false
+    }
+    Some(_) => {
+      bail!("runtime.workers.compio_direct_h1 must resolve from a positive integer or \"auto\"")
+    }
+  };
+  let multiplier = lookup(&["runtime", "worker_multipliers", "compio_direct_h1"])
+    .or_else(|| lookup(&["runtime", "worker_multipliers", "runtime"]));
+  let multiplier = match multiplier {
+    None => 1.0,
+    Some(value) => value.as_float().or_else(|| value.as_integer().map(|n| n as f64))
+      .filter(|n| n.is_finite() && *n > 0.0)
+      .context("runtime.worker_multipliers.compio_direct_h1 must resolve to a finite number greater than 0")?,
+  };
+  if automatic {
+    let parallelism = std::thread::available_parallelism()
+      .map(usize::from)
+      .unwrap_or(1);
+    let resolved = (parallelism as f64 * multiplier).ceil();
+    if !resolved.is_finite() || resolved > usize::MAX as f64 {
+      bail!(
+        "runtime.workers.compio_direct_h1 automatic worker resolution overflows; correct the legacy worker settings before migration"
+      );
+    }
+  }
+  Ok(())
+}
+
+/// Applies the epoch 1 to epoch 2 Compio removal after validating each legacy
+/// value against the epoch 1 representation it used to accept.
+pub(crate) fn transform_epoch1_to2(
+  raw: &str,
+  file: &str,
+) -> anyhow::Result<(String, Vec<MigrationChange>)> {
+  const FIELDS: &[(&str, &[&str])] = &[
+    (
+      "main_runtime",
+      &["auto", "hybrid_compio", "tokio_hyper", "compio"],
+    ),
+    ("direct_h1_io", &["auto", "tokio_hyper", "compio"]),
+    ("topology_policy", &["allow_fallback", "require_exact"]),
+  ];
+  let mut document = raw
+    .parse::<DocumentMut>()
+    .with_context(|| format!("failed to parse TOML from {file}"))?;
+  let mut changes = Vec::new();
+  let root = document.as_table_mut();
+  let Some(runtime) = root.get_mut("runtime").and_then(Item::as_table_like_mut) else {
+    return Ok((raw.to_string(), changes));
+  };
+
+  for (key, accepted) in FIELDS {
+    let Some(item) = runtime.get(key) else {
+      continue;
+    };
+    if !item
+      .as_value()
+      .and_then(Value::as_str)
+      .is_some_and(|v| accepted.contains(&v))
+    {
+      bail!("runtime.{key} has an invalid epoch 1 value");
+    }
+    runtime.remove(key);
+    changes.push(change(
+      file,
+      &format!("runtime.{key}"),
+      "remove",
+      "removed after validating the epoch 1 value",
+    ));
+  }
+
+  if let Some(workers) = runtime.get_mut("workers").and_then(Item::as_table_like_mut)
+    && let Some(item) = workers.get("compio_direct_h1")
+  {
+    let valid = item.as_value().is_some_and(|value| {
+      value.as_str() == Some("auto") || value.as_integer().is_some_and(|count| count > 0)
+    });
+    if !valid {
+      bail!("runtime.workers.compio_direct_h1 must be a positive integer or \"auto\"");
+    }
+    workers.remove("compio_direct_h1");
+    changes.push(change(
+      file,
+      "runtime.workers.compio_direct_h1",
+      "remove",
+      "removed after validating the epoch 1 value",
+    ));
+  }
+
+  if let Some(multipliers) = runtime
+    .get_mut("worker_multipliers")
+    .and_then(Item::as_table_like_mut)
+    && let Some(item) = multipliers.get("compio_direct_h1")
+  {
+    let valid = item.as_value().is_some_and(|value| {
+      let multiplier = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|n| n as f64));
+      multiplier.is_some_and(|n| n.is_finite() && n > 0.0)
+    });
+    if !valid {
+      bail!("runtime.worker_multipliers.compio_direct_h1 must be a finite number greater than 0");
+    }
+    multipliers.remove("compio_direct_h1");
+    changes.push(change(
+      file,
+      "runtime.worker_multipliers.compio_direct_h1",
+      "remove",
+      "removed after validating the epoch 1 value",
+    ));
+  }
+
+  for key in ["workers", "worker_multipliers"] {
+    if runtime
+      .get_mut(key)
+      .and_then(Item::as_table_like_mut)
+      .is_some_and(|table| table.is_empty())
+    {
+      runtime.remove(key);
+    }
+  }
+  if changes.is_empty() {
+    Ok((raw.to_string(), changes))
+  } else {
+    Ok((document.to_string(), changes))
+  }
+}
+
 fn migrate_tls(
   tls: &mut Table,
   path: &str,
@@ -564,5 +707,127 @@ rate = "10/s"
     assert_eq!(once, twice);
     assert_eq!(first.len(), 1);
     assert!(second.is_empty());
+  }
+
+  #[test]
+  fn epoch_two_removes_only_validated_compio_fields_and_preserves_retained_values() {
+    let raw = r#"[runtime]
+main_runtime = "hybrid_compio" # obsolete preset
+direct_h1_io = "compio"
+topology_policy = "require_exact"
+worker_threads = "auto" # retained compatibility field
+
+[runtime.workers]
+tokio = 4
+compio_direct_h1 = "auto"
+
+[runtime.worker_multipliers]
+runtime = 1.5
+tokio = 2.0
+compio_direct_h1 = 0.5
+accept = 1.25
+"#;
+    let (migrated, changes) = transform_epoch1_to2(raw, "config.toml").expect("migration");
+    assert!(!migrated.contains("main_runtime"));
+    assert!(!migrated.contains("direct_h1_io"));
+    assert!(!migrated.contains("topology_policy"));
+    assert!(!migrated.contains("compio_direct_h1"));
+    assert!(migrated.contains("worker_threads = \"auto\" # retained compatibility field"));
+    assert!(migrated.contains("tokio = 4"));
+    assert!(migrated.contains("runtime = 1.5"));
+    assert!(migrated.contains("tokio = 2.0"));
+    assert!(migrated.contains("accept = 1.25"));
+    assert_eq!(changes.len(), 5);
+    assert!(changes.iter().all(|change| change.action == "remove"));
+    let (again, second) = transform_epoch1_to2(&migrated, "config.toml").expect("idempotent");
+    assert_eq!(again, migrated);
+    assert!(second.is_empty());
+  }
+
+  #[test]
+  fn epoch_two_migrates_inline_and_dotted_runtime_tables() {
+    for raw in [
+      r#"runtime = { main_runtime = "compio", workers = { compio_direct_h1 = 2, tokio = 3 }, worker_multipliers = { compio_direct_h1 = 0.5, tokio = 1.25 } }"#,
+      "[runtime]\nworkers = { compio_direct_h1 = 2, tokio = 3 }\nworker_multipliers = { compio_direct_h1 = 0.5, tokio = 1.25 }\n",
+      "runtime.workers.compio_direct_h1 = 2\nruntime.workers.tokio = 3\nruntime.worker_multipliers.compio_direct_h1 = 0.5\nruntime.worker_multipliers.tokio = 1.25\n",
+    ] {
+      let (migrated, changes) =
+        transform_epoch1_to2(raw, "included.toml").expect("valid legacy TOML");
+      let value: toml::Value = toml::from_str(&migrated).expect("valid migrated TOML");
+      assert_eq!(value["runtime"]["workers"]["tokio"].as_integer(), Some(3));
+      assert_eq!(
+        value["runtime"]["worker_multipliers"]["tokio"].as_float(),
+        Some(1.25)
+      );
+      assert!(!migrated.contains("compio"));
+      assert!(changes.iter().all(|change| change.file == "included.toml"));
+      let (again, changes) = transform_epoch1_to2(&migrated, "included.toml").expect("idempotent");
+      assert_eq!(migrated, again);
+      assert!(changes.is_empty());
+    }
+    assert!(
+      transform_epoch1_to2(
+        "runtime = { workers = { compio_direct_h1 = 0 } }",
+        "included.toml"
+      )
+      .is_err()
+    );
+  }
+
+  #[test]
+  fn epoch_two_checks_effective_auto_workers_and_legacy_fallbacks() {
+    for raw in [
+      "[runtime.workers]\ncompio_direct_h1 = 'auto'\n[runtime.worker_multipliers]\ncompio_direct_h1 = 1e300\n",
+      "[runtime.workers]\ntokio = 1\n[runtime.worker_multipliers]\nruntime = 1e300\ntokio = 1.0\n",
+    ] {
+      let document: toml::Value = toml::from_str(raw).expect("legacy TOML");
+      assert!(validate_epoch1_runtime_workers(&document).is_err());
+    }
+    for raw in [
+      "[runtime.workers]\ncompio_direct_h1 = 2\n[runtime.worker_multipliers]\ncompio_direct_h1 = 1e300\n",
+      "[runtime.worker_multipliers]\nruntime = 1e300\ncompio_direct_h1 = 1.0\n",
+    ] {
+      let document: toml::Value = toml::from_str(raw).expect("legacy TOML");
+      validate_epoch1_runtime_workers(&document)
+        .expect("fixed counts and canonical overrides remain valid");
+    }
+  }
+
+  #[test]
+  fn epoch_two_rejects_malformed_obsolete_values_before_removing_them() {
+    for (raw, expected) in [
+      (
+        "[runtime]\nmain_runtime = \"unknown\"\n",
+        "runtime.main_runtime",
+      ),
+      ("[runtime]\ndirect_h1_io = true\n", "runtime.direct_h1_io"),
+      (
+        "[runtime.workers]\ncompio_direct_h1 = 0\n",
+        "runtime.workers.compio_direct_h1",
+      ),
+      (
+        "[runtime.worker_multipliers]\ncompio_direct_h1 = 0.0\n",
+        "runtime.worker_multipliers.compio_direct_h1",
+      ),
+    ] {
+      let error = transform_epoch1_to2(raw, "config.toml").expect_err("invalid value");
+      assert!(error.to_string().contains(expected), "{expected}: {error}");
+    }
+  }
+
+  #[test]
+  fn zero_to_two_composes_existing_alias_migration_before_compio_removal() {
+    let raw = r#"[listeners]
+http_bind = "127.0.0.1:8080"
+
+[runtime]
+main_runtime = "compio"
+"#;
+    let (epoch1, first_changes) = transform_document(raw, "config.toml").expect("0 to 1");
+    let (epoch2, second_changes) = transform_epoch1_to2(&epoch1, "config.toml").expect("1 to 2");
+    assert!(epoch2.contains("http_binds = [\"127.0.0.1:8080\"]"));
+    assert!(!epoch2.contains("main_runtime"));
+    assert_eq!(first_changes.len(), 1);
+    assert_eq!(second_changes.len(), 1);
   }
 }

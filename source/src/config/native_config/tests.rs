@@ -26,11 +26,10 @@ fn converts_json_pointer_indexes_to_native_paths() {
 }
 
 #[test]
-fn reports_runtime_compatibility_aliases_with_stable_codes() {
+fn retained_runtime_compatibility_aliases_keep_stable_codes() {
   let document = document(
     r#"
 [runtime]
-main_runtime = "compio"
 worker_threads = "auto"
 
 [runtime.workers]
@@ -38,29 +37,15 @@ tokio = 3
 
 [runtime.worker_multipliers]
 runtime = 1.5
-compio_direct_h1 = 0.5
 "#,
   );
   let mut diagnostics = Vec::new();
   append_runtime_compatibility_diagnostics(Path::new("oxibelt.toml"), &document, &mut diagnostics);
 
-  assert_eq!(diagnostics.len(), 3);
+  assert_eq!(diagnostics.len(), 2);
+  assert_eq!(diagnostics[0].field_path, "runtime.worker_threads");
   assert_eq!(
-    diagnostics[0].code,
-    "CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS"
-  );
-  assert_eq!(diagnostics[0].field_path, "runtime.main_runtime");
-  assert_eq!(
-    diagnostics[1].code,
-    "CFG_RUNTIME_WORKER_THREADS_COMPATIBILITY_ALIAS"
-  );
-  assert_eq!(diagnostics[1].field_path, "runtime.worker_threads");
-  assert_eq!(
-    diagnostics[2].code,
-    "CFG_RUNTIME_WORKER_THREADS_COMPATIBILITY_ALIAS"
-  );
-  assert_eq!(
-    diagnostics[2].field_path,
+    diagnostics[1].field_path,
     "runtime.worker_multipliers.runtime"
   );
   assert!(
@@ -71,26 +56,63 @@ compio_direct_h1 = 0.5
 }
 
 #[test]
-fn canonical_runtime_fields_do_not_emit_compatibility_warnings() {
+fn removed_runtime_fields_get_fatal_source_aware_diagnostics_when_permissive() {
   let document = document(
     r#"
+[config]
+strict_unknown_fields = false
+
 [runtime]
-main_runtime = "hybrid_compio"
-topology_policy = "require_exact"
+direct_h1_io = "compio"
 
 [runtime.workers]
-tokio = 3
 compio_direct_h1 = 2
-
-[runtime.worker_multipliers]
-tokio = 1.0
-compio_direct_h1 = 0.5
 "#,
   );
-  let mut diagnostics = Vec::new();
-  append_runtime_compatibility_diagnostics(Path::new("oxibelt.toml"), &document, &mut diagnostics);
+  let diagnostics = load_error_diagnostics(
+    Path::new("oxibelt.toml"),
+    &document,
+    "configuration contains removed field(s): runtime.direct_h1_io, runtime.workers.compio_direct_h1",
+  );
+  assert_eq!(diagnostics.len(), 2);
+  assert!(diagnostics.iter().all(|diagnostic| {
+    diagnostic.severity == ConfigDiagnosticSeverity::Fatal
+      && diagnostic.code == "CFG_REMOVED_FIELD"
+      && diagnostic.stage == ConfigDiagnosticStage::Schema
+      && diagnostic.source.file == "oxibelt.toml"
+  }));
+  assert!(
+    diagnostics
+      .iter()
+      .any(|d| d.field_path == "runtime.direct_h1_io")
+  );
+  assert!(
+    diagnostics
+      .iter()
+      .any(|d| d.field_path == "runtime.workers.compio_direct_h1")
+  );
+}
 
-  assert!(diagnostics.is_empty());
+#[test]
+fn malformed_removed_runtime_value_is_fatal_at_its_field() {
+  let document = document(
+    r#"
+[config]
+strict_unknown_fields = false
+
+[runtime]
+main_runtime = "unknown"
+"#,
+  );
+  let diagnostics = load_error_diagnostics(
+    Path::new("oxibelt.toml"),
+    &document,
+    "runtime.main_runtime has an invalid legacy enum value",
+  );
+  assert_eq!(diagnostics.len(), 1);
+  assert_eq!(diagnostics[0].code, "CFG_REMOVED_FIELD_INVALID");
+  assert_eq!(diagnostics[0].field_path, "runtime.main_runtime");
+  assert_eq!(diagnostics[0].severity, ConfigDiagnosticSeverity::Fatal);
 }
 
 #[test]

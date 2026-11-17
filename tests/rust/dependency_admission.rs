@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const CARGO_VET_BOOTSTRAP_EXEMPTIONS_PATH: &str = "supply-chain/cargo-vet-bootstrap-exemptions.txt";
 const CARGO_VET_BOOTSTRAP_EXEMPTIONS_SHA256: &str =
-  "ead1d1105d6a4c791bcd7c0893466a6329ec29d7757c6226648158354d45b033";
+  "30c96c7d993f1b7eb7db9a7815e2e91a579e83d10928a3a39fc8365889a38f14";
 
 fn repo_root() -> PathBuf {
   Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -234,7 +234,7 @@ fn cargo_vet_bootstrap_exemption_subjects() -> BTreeSet<String> {
   }
   assert_eq!(
     subjects.len(),
-    443,
+    424,
     "cargo-vet bootstrap exemption inventory must remain independently frozen"
   );
   subjects

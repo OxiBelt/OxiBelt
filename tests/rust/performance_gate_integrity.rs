@@ -287,9 +287,17 @@ fn run_load_profile_harness_with_errors(
   load_label: &str,
   probe_errors: &str,
 ) -> HarnessRun {
+  run_load_profile_harness_for_protocol(profile_label, load_label, probe_errors, "h2")
+}
+
+fn run_load_profile_harness_for_protocol(
+  profile_label: &str,
+  load_label: &str,
+  probe_errors: &str,
+  protocol: &str,
+) -> HarnessRun {
   let script = performance_script_text();
-  let functions = format!(
-    "{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}\n\n{}",
+  let functions = [
     extract_bash_function(&script, "diagnostic_profile_comparator_from_label"),
     extract_bash_function(&script, "load_errors_within_budget"),
     extract_bash_function(&script, "diagnostic_comparator_label"),
@@ -298,13 +306,13 @@ fn run_load_profile_harness_with_errors(
     extract_bash_function(&script, "direct_h2_diagnostic_load_label"),
     extract_bash_function(&script, "metrics_mode_diagnostic_load_label"),
     extract_bash_function(&script, "h3_inline_diagnostic_load_label"),
-    extract_bash_function(&script, "runtime_direct_h1_diagnostic_load_label"),
     extract_bash_function(&script, "diagnostic_load_label"),
     extract_bash_function(&script, "normalize_diagnostic_load_result"),
     extract_bash_function(&script, "assert_diagnostic_result"),
     extract_bash_function(&script, "should_profile_load"),
-    extract_bash_function(&script, "run_load")
-  );
+    extract_bash_function(&script, "run_load"),
+  ]
+  .join("\n\n");
   let temp_dir = HarnessTempDir::new("oxibelt-performance-profile-load-");
   let harness_path = temp_dir.join("harness.sh");
   let events_path = temp_dir.join("events.log");
@@ -316,6 +324,7 @@ fn run_load_profile_harness_with_errors(
     .env("PROFILE_LABEL", profile_label)
     .env("LOAD_LABEL", load_label)
     .env("PROBE_ERRORS", probe_errors)
+    .env("LOAD_PROTOCOL", protocol)
     .output()
     .expect("Bash harness should execute");
   let events = fs::read_to_string(&events_path).unwrap_or_default();
@@ -734,7 +743,7 @@ max_load_errors_per_million=100
 
 run_probe_json() {{
   printf 'PROBE %s\n' "$*" >>"${{events}}"
-  printf '{{"type":"load","label":"%s","protocol":"h2","requests":1,"rps":1,"p99_ms":1,"errors":%s}}\n' "${{LOAD_LABEL:?}}" "${{PROBE_ERRORS:-0}}"
+  printf '{{"type":"load","label":"%s","protocol":"%s","requests":1,"rps":1,"p99_ms":1,"errors":%s}}\n' "${{LOAD_LABEL:?}}" "${{LOAD_PROTOCOL:-h2}}" "${{PROBE_ERRORS:-0}}"
 }}
 
 run_profiled_probe_json() {{
@@ -767,13 +776,9 @@ static_fast_path_gate_label() {{
   return 1
 }}
 
-runtime_direct_h1_paired_load_label() {{
-  return 1
-}}
-
 {functions}
 
-run_load "${{LOAD_LABEL:?}}" h2 oxibelt "/perf/h2?body=ok" 1 1
+run_load "${{LOAD_LABEL:?}}" "${{LOAD_PROTOCOL:-h2}}" oxibelt "/perf/load?body=ok" 1 1
 "#
   );
   fs::write(path, harness).expect("Bash harness should be writable");
@@ -1329,7 +1334,7 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
   );
   assert!(
         script.contains(
-            "--serving-type all|reverse-proxy|static-files|oxibelt-features|text-search-diagnostics|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|runtime-direct-h1|metrics-mode|oxibelt-aggressive-long-run"
+            "--serving-type all|reverse-proxy|static-files|oxibelt-features|text-search-diagnostics|oxibelt-soak-stress|accept-multipliers|remote-signer|pool-concurrency|direct-h2-contention|metrics-mode|oxibelt-aggressive-long-run"
         ),
         "usage should document every supported serving type"
     );
@@ -1344,7 +1349,6 @@ fn serving_type_defaults_to_all_and_usage_documents_matrix_values() {
     "remote-signer",
     "pool-concurrency",
     "direct-h2-contention",
-    "runtime-direct-h1",
     "metrics-mode",
     "oxibelt-aggressive-long-run",
   ] {
@@ -1488,57 +1492,43 @@ fn text_search_diagnostics_are_cpu_measured_and_non_blocking() {
 }
 
 #[test]
-fn runtime_direct_h1_serving_type_runs_benchmark_only_experiment() {
+fn h3_inline_fast_path_experiment_remains_gated_and_diagnostic() {
   let script = performance_script_text();
-
   for expected in [
-    "run_runtime_direct_h1_group()",
-    "runtime-direct-h1)",
-    "oxibelt-runtime-direct-h1-control-h1",
-    "oxibelt-runtime-direct-h1-control-h2",
-    "oxibelt-runtime-direct-h1-control-h3",
-    "oxibelt-runtime-direct-h1-control-post-1k-json-h2",
-    "oxibelt-runtime-direct-h1-control-chunked-post-16k-h1",
-    "oxibelt-runtime-direct-h1-experiment-h1",
-    "oxibelt-runtime-direct-h1-experiment-h2",
-    "oxibelt-runtime-direct-h1-experiment-h3",
-    "oxibelt-runtime-direct-h1-experiment-post-1k-json-h2",
-    "oxibelt-runtime-direct-h1-experiment-chunked-post-16k-h1",
     "oxibelt-h3-inline-fast-path-experiment",
     "assert_min_rps_regression_gate \"oxibelt-h3-inline-fast-path-experiment\"",
-    "--direct-h1-io-compio",
-    "upsert_oxibelt_config_scalar",
-    "\"runtime\" \"direct_h1_io\" '\"compio\"'",
     "--inline-bodyless-h3-fast-path",
     "\"proxy.http3\" \"inline_bodyless_fast_path\" \"true\"",
     "h3_inline_diagnostic_load_label",
-    "runtime_direct_h1_diagnostic_load_label",
-    "--detailed-hot-path-diagnostics",
-    "direct_h1_io_backend_metrics",
-    "fast_path.io_backend.direct_h1",
-    "append_runtime_direct_h1_cpu_evidence",
-    "append_runtime_direct_h1_thread_cpu_evidence",
-    "container_procfs_process_ticks",
-    "container_procfs_thread_ticks",
-    ".total_requests_including_warmup // .requests // 0",
-    "requests_observed_during_cpu_window",
-    "compio_direct_h1_service_metrics",
-    "fast_path.compio_direct_h1",
-    "run_runtime_direct_h1_soak_gate",
-    "OXIBELT_PERF_RUNTIME_DIRECT_H1_SOAK_SECONDS",
-    "OB-P1-01-persistent-compio-30m-soak",
-    "duration_seconds >= 1800",
-    "$fd_delta == 0",
-    "$thread_delta == 0",
-    "16777216",
-    "$after_service.connections.active",
-    "$after_service.queue_occupancy",
   ] {
     assert!(
       script.contains(expected),
-      "performance script should include runtime-direct-h1 experiment evidence: {expected}"
+      "missing H3 inline experiment evidence: {expected}"
     );
   }
+}
+
+#[test]
+fn h3_inline_fast_path_request_errors_are_diagnostic() {
+  let run =
+    run_load_profile_harness_for_protocol("", "oxibelt-h3-inline-fast-path-experiment", "1", "h3");
+
+  assert!(
+    run.output.status.success(),
+    "H3 inline diagnostic row should not fail the harness: {}",
+    String::from_utf8_lossy(&run.output.stderr)
+  );
+  assert!(
+    run.events.contains("\"protocol\":\"h3\"")
+      && run.events.contains("\"diagnostic\":true")
+      && run.events.contains("\"diagnostic_status\":\"fail\"")
+      && run.events.contains(
+        "performance probe reported request errors: oxibelt-h3-inline-fast-path-experiment"
+      )
+      && !run.events.contains("ASSERT "),
+    "H3 inline request errors should be appended as diagnostic evidence without primary assertion:\n{}",
+    run.events
+  );
 }
 
 #[test]
@@ -1580,63 +1570,7 @@ fn performance_harness_creates_private_unpredictable_artifacts_and_validates_loa
 }
 
 #[test]
-fn runtime_direct_h1_experiment_request_errors_are_diagnostic() {
-  let diagnostic =
-    run_load_profile_harness_with_errors("", "oxibelt-runtime-direct-h1-experiment-h2", "1");
-  assert!(
-    diagnostic.output.status.success(),
-    "runtime-direct-h1 diagnostic experiment should not fail the harness: {}",
-    String::from_utf8_lossy(&diagnostic.output.stderr)
-  );
-  assert!(
-    diagnostic
-      .events
-      .contains("\"label\":\"oxibelt-runtime-direct-h1-experiment-h2\"")
-      && diagnostic.events.contains("\"diagnostic\":true")
-      && diagnostic.events.contains("\"diagnostic_status\":\"fail\"")
-      && diagnostic.events.contains(
-        "performance probe reported request errors: oxibelt-runtime-direct-h1-experiment-h2"
-      ),
-    "experiment row should be appended as diagnostic failure evidence:\n{}",
-    diagnostic.events
-  );
-  assert!(
-    !diagnostic.events.contains("ASSERT "),
-    "diagnostic experiment rows should bypass the primary assertion path"
-  );
-
-  let bodyful_diagnostic = run_load_profile_harness_with_errors(
-    "",
-    "oxibelt-runtime-direct-h1-experiment-post-1k-json-h2",
-    "1",
-  );
-  assert!(
-    bodyful_diagnostic.output.status.success()
-      && bodyful_diagnostic.events.contains("\"diagnostic\":true")
-      && !bodyful_diagnostic.events.contains("ASSERT "),
-    "bodyful experiment rows should remain diagnostic no-dup controls:\n{}",
-    bodyful_diagnostic.events
-  );
-
-  let primary =
-    run_load_profile_harness_with_errors("", "oxibelt-runtime-direct-h1-control-h2", "1");
-  assert!(
-    primary.output.status.success(),
-    "primary-boundary harness uses a stub assertion and should complete"
-  );
-  assert!(
-    primary.events.contains("ASSERT ")
-      && primary
-        .events
-        .contains("\"label\":\"oxibelt-runtime-direct-h1-control-h2\"")
-      && !primary.events.contains("\"diagnostic_status\":\"fail\""),
-    "control rows should remain on the primary assertion path:\n{}",
-    primary.events
-  );
-}
-
-#[test]
-fn runtime_direct_h1_config_overrides_upsert_existing_toml_tables() {
+fn h3_inline_fast_path_config_override_upserts_existing_toml_tables() {
   let temp = HarnessTempDir::new("oxibelt-config-upsert-");
   let config_path = temp.join("oxibelt.toml");
   let harness_path = temp.join("upsert.sh");
@@ -1658,7 +1592,6 @@ set -euo pipefail
 
 {}
 
-upsert_oxibelt_config_scalar "$1" "runtime" "direct_h1_io" '"compio"'
 upsert_oxibelt_config_scalar "$1" "proxy.http3" "inline_bodyless_fast_path" "true"
 "#,
       extract_bash_function(&performance_script_text(), "upsert_oxibelt_config_scalar")
@@ -1680,19 +1613,10 @@ upsert_oxibelt_config_scalar "$1" "proxy.http3" "inline_bodyless_fast_path" "tru
   let config_text = fs::read_to_string(&config_path).expect("config should be readable");
   assert_eq!(config_text.matches("[runtime]").count(), 1);
   assert_eq!(config_text.matches("[proxy.http3]").count(), 1);
-  assert_eq!(config_text.matches("direct_h1_io").count(), 1);
   assert_eq!(config_text.matches("inline_bodyless_fast_path").count(), 1);
 
   let value: toml::Value =
     toml::from_str(&config_text).expect("mutated config should remain valid TOML");
-  assert_eq!(
-    value
-      .get("runtime")
-      .and_then(toml::Value::as_table)
-      .and_then(|runtime| runtime.get("direct_h1_io"))
-      .and_then(toml::Value::as_str),
-    Some("compio")
-  );
   assert_eq!(
     value
       .get("proxy")
@@ -1804,74 +1728,6 @@ configure_performance_circuit_breakers "$1"
       scope.max_decompression_jobs,
       CapacitySetting::Auto,
       "{scope_name}.max_decompression_jobs should keep exercising automatic resource sizing"
-    );
-  }
-}
-
-#[test]
-fn runtime_direct_h1_performance_config_fits_the_compio_resource_projection() {
-  let script = performance_script_text();
-  let temp = HarnessTempDir::new("oxibelt-runtime-direct-h1-performance-budget-");
-  let config_path = temp.join("oxibelt.toml");
-  let harness_path = temp.join("configure.sh");
-  let baseline_path = oxibelt_performance_fixture_root().join("baseline/config/oxibelt.toml");
-  fs::copy(&baseline_path, &config_path).unwrap_or_else(|error| {
-    panic!(
-      "failed to copy {} to the harness: {error}",
-      baseline_path.display()
-    )
-  });
-  fs::write(
-    &harness_path,
-    format!(
-      r#"#!/usr/bin/env bash
-set -euo pipefail
-serving_type=runtime-direct-h1
-
-{}
-
-{}
-
-configure_performance_circuit_breakers "$1"
-"#,
-      extract_bash_function(&script, "upsert_oxibelt_config_scalar"),
-      extract_bash_function(&script, "configure_performance_circuit_breakers")
-    ),
-  )
-  .expect("runtime direct-H1 budget harness should be writable");
-
-  let output = Command::new("bash")
-    .arg(&harness_path)
-    .arg(&config_path)
-    .output()
-    .expect("runtime direct-H1 budget harness should run");
-  assert!(
-    output.status.success(),
-    "runtime direct-H1 budget harness failed: {}",
-    String::from_utf8_lossy(&output.stderr)
-  );
-
-  let config_text = fs::read_to_string(&config_path).expect("config should be readable");
-  let config: Config =
-    toml::from_str(&config_text).expect("runtime direct-H1 performance config should parse");
-  assert_eq!(
-    config.runtime.worker_threads, 4,
-    "paired Hyper and Compio rows should use one deterministic worker topology"
-  );
-  for (scope_name, scope) in [
-    ("global", &config.circuit_breakers.global),
-    ("route_defaults", &config.circuit_breakers.route_defaults),
-    ("pool_defaults", &config.circuit_breakers.pool_defaults),
-  ] {
-    assert_eq!(
-      scope.max_connections,
-      CapacitySetting::Fixed(120),
-      "{scope_name}.max_connections should remain within the Compio memory and FD resource projection"
-    );
-    assert_eq!(
-      scope.max_pending_requests,
-      CapacitySetting::Fixed(0),
-      "{scope_name}.max_pending_requests should remain an immediate rejection boundary"
     );
   }
 }
@@ -4222,12 +4078,6 @@ fn h1_h2_and_h3_rows_attach_fast_path_hit_rate() {
       && script.contains("fast_path.pool.direct_h2")
       && script.contains("direct_h2_pool_delta"),
     "split upstream-H2 rows should attach direct-H2 pool diagnostics"
-  );
-  assert!(
-    script.contains("direct_h1_io_backend_metrics")
-      && script.contains("fast_path.io_backend.direct_h1")
-      && script.contains("direct_h1_io_backend_delta_json"),
-    "gated rows should attach direct-H1 runtime backend diagnostics"
   );
   assert!(
     script.contains("direct_h2) ;;"),

@@ -352,7 +352,6 @@ config:
     memory_only_state = true
     unprivileged_mode = true
     worker_threads = "auto"
-    main_runtime = "auto"
 
     [runtime.accept]
     workers = "auto"

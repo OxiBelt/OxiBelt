@@ -75,11 +75,7 @@ impl OxiBeltBuilder {
     self
   }
 
-  /// Supplies capability evidence produced by an isolated owned-runtime probe.
-  ///
-  /// Callers which omit this value do not implicitly execute hidden commands in
-  /// their host binary. Compio is reported unavailable and normal topology
-  /// fallback or exact-policy rejection applies.
+  /// Supplies capability evidence for the owned Tokio runtime.
   pub fn runtime_capabilities(mut self, capabilities: RuntimeTopologyCapabilities) -> Self {
     self.runtime_capabilities = Some(capabilities);
     self
@@ -256,13 +252,7 @@ impl EmbeddedServer {
 fn owned_capabilities(
   capabilities: Option<RuntimeTopologyCapabilities>,
 ) -> RuntimeTopologyCapabilities {
-  capabilities.unwrap_or_else(|| {
-    let mut capabilities = crate::runtime::topology_config::available_capabilities(None);
-    capabilities.compio_main = crate::runtime::topology::RuntimeCapability::Unavailable(
-      crate::runtime::topology::RuntimeTopologyReason::CompioProbeFailed,
-    );
-    capabilities
-  })
+  capabilities.unwrap_or_else(crate::runtime::topology_config::available_capabilities)
 }
 
 fn embedded_signal_mode(hooks: crate::process_globals::ProcessGlobalHooks) -> SignalMode {
@@ -282,9 +272,7 @@ fn record_owned_topology(topology: &RuntimeTopologySnapshot) {
     topology_policy = topology.policy.as_str(),
     outcome = topology.outcome.as_str(),
     reason = topology.reason.as_str(),
-    compatibility_island_count = topology.compatibility_boundaries.compatibility_island_count,
     tokio_executor_workers = topology.workers.tokio_executor_workers,
-    compio_direct_h1_workers = topology.workers.compio_direct_h1_workers,
     direct_h1_backend = topology.direct_h1.resolved.as_str(),
     "resolved async runtime topology"
   );

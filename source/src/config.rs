@@ -167,9 +167,7 @@ pub use real_ip::RealIpRuleConfig;
 pub(crate) use real_ip::{
   normalize_real_ip_host_selector, normalize_real_ip_server_name_selector, validate_real_ip_rules,
 };
-use redaction::{
-  redact_effective_toml, set_toml_float_path, set_toml_integer_path, set_toml_value_path,
-};
+use redaction::{redact_effective_toml, set_toml_float_path, set_toml_integer_path};
 pub use retry::*;
 pub use rollout_identity::{
   ConfigRolloutApplyState, ConfigRolloutIdentity, ConfigRolloutMode, KubernetesRolloutTarget,
@@ -187,7 +185,7 @@ pub use security_headers::*;
 use shape::{
   allowed_config_keys, normalize_merged_lb_policy_compat,
   normalize_merged_upstream_resolution_compat, reject_removed_access_log_config,
-  validate_merged_toml_shape,
+  reject_removed_runtime_config, validate_merged_toml_shape,
 };
 pub use shared_state::{
   BackendFailureMode, RedisAuthConfig, RedisPlaintextPolicy, RedisPoolConfig, RedisTlsConfig,

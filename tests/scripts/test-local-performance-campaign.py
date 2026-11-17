@@ -297,7 +297,7 @@ if mode == "malformed-report":
     raise SystemExit(0)
 
 payload = {
-    "schema_version": 33,
+    "schema_version": 34,
     "profile": "benchmark",
     "primary_target_cpu": value("--primary-target-cpu"),
     "expected_target_cpus": value("--expected-target-cpus").split(","),
@@ -719,7 +719,7 @@ os.execv("/usr/bin/timeout", ["timeout", *args])
     @staticmethod
     def passing_report(primary_target: str) -> dict[str, object]:
         return {
-            "schema_version": 33,
+            "schema_version": 34,
             "profile": "benchmark",
             "primary_target_cpu": primary_target,
             "quorum": {"status": "pass", "violations": []},
@@ -1177,7 +1177,7 @@ os.execv("/usr/bin/timeout", ["timeout", *args])
         baseline.write_text(
             json.dumps(
                 {
-                    "schema_version": 33,
+                    "schema_version": 34,
                     "quorum": {"status": "fail"},
                     "regression_gates": {
                         "status": "pass",

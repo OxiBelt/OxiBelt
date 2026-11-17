@@ -22,7 +22,6 @@ export const FeatureGraduationFeatureIds = [
   'config-activation-planner',
   'runtime-confinement-contract',
   'owned-embedded-runtime-api',
-  'compio-direct-h1-io',
   'crlite',
   'tls-upstream-revocation',
   'root-netport-switcher',
@@ -37,7 +36,6 @@ const FeatureDependencies: Readonly<Record<(typeof FeatureGraduationFeatureIds)[
   'config-activation-planner': [],
   'runtime-confinement-contract': [],
   'owned-embedded-runtime-api': [],
-  'compio-direct-h1-io': [],
   crlite: [],
   'tls-upstream-revocation': [],
   'root-netport-switcher': [],
@@ -417,7 +415,7 @@ function ValidatePolicySemantics(Policy: FeatureGraduationPolicy): void {
     AssertExactSet(
       `feature ${Feature.id} qualified platforms`,
       Feature.qualifiedPlatforms,
-      Feature.id === 'compio-direct-h1-io' ? ['linux/amd64'] : ['linux/amd64', 'linux/arm64']
+      ['linux/amd64', 'linux/arm64']
     )
     const ApplicableGateIds = Policy.gates.filter(Gate => Gate.appliesTo.includes(Feature.id)).map(Gate => Gate.id)
     AssertExactSet(`feature ${Feature.id} gate ids`, Feature.gateIds, ApplicableGateIds)

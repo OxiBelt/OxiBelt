@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use crate::cli::OutputFormat;
 
 pub(crate) const REPORT_SCHEMA_VERSION: u32 = 1;
-pub(crate) const NATIVE_SCHEMA_EPOCH: u32 = 1;
+pub(crate) const NATIVE_SCHEMA_EPOCH: u32 = 2;
 
 pub(crate) fn print_serializable<T: Serialize>(
   value: &T,
@@ -48,7 +48,7 @@ mod tests {
   fn error_reports_have_a_stable_envelope() {
     let report = error_report("migrate", "write", "failed");
     assert_eq!(report["report_schema_version"], 1);
-    assert_eq!(report["native_schema_epoch"], 1);
+    assert_eq!(report["native_schema_epoch"], 2);
     assert_eq!(report["operation"], "migrate");
     assert_eq!(report["diagnostics"][0]["severity"], "fatal");
     assert!(!report_ok(&report));

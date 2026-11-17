@@ -7,20 +7,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use clap::{Args, Parser, Subcommand};
 use oxibelt::config::{Config, HotReloadMode, RuntimeOverrides};
-use oxibelt::runtime::backend::CompioDriverSelection;
-use oxibelt::runtime::main_runtime::{ActiveMainRuntime, MainRuntime};
-use oxibelt::runtime::topology::{
-  RuntimeCapability, RuntimeRequestedPreset, RuntimeResolvedPreset, RuntimeTopologyPolicy,
-  RuntimeTopologyReason, RuntimeTopologySnapshot, resolve_runtime_topology,
-};
-use oxibelt::runtime::topology_config::{
-  available_capabilities, capabilities_with_compio_direct_h1_budget, request_from_config,
-};
+use oxibelt::runtime::main_runtime::MainRuntime;
+use oxibelt::runtime::topology::{RuntimeTopologySnapshot, resolve_runtime_topology};
+use oxibelt::runtime::topology_config::{available_capabilities, request_from_config};
 
 mod runtime_diagnostics;
 use runtime_diagnostics::{
   RuntimeCheckCommand, RuntimeProbeCommand, handle_runtime_check_command,
-  handle_runtime_probe_command, run_compio_main_child, run_compio_probe_child,
+  handle_runtime_probe_command,
 };
 
 #[global_allocator]
@@ -216,13 +210,6 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     return run_configuration_check(effective_config, override_warnings);
   }
 
-  let worker_threads = effective_config.runtime.workers.tokio;
-  let request = request_from_config(&effective_config);
-  let compio_preflight = preflight_compio_for_startup(request.requested_preset, worker_threads);
-  let mut capabilities = available_capabilities(compio_preflight.driver);
-  if let Some(reason) = compio_preflight.failure_reason {
-    capabilities.compio_main = RuntimeCapability::Unavailable(reason);
-  }
   let result = oxibelt::OxiBelt::builder(config)
     .run_options(oxibelt::RunOptions {
       config_path: Some(config_path.clone()),
@@ -230,7 +217,7 @@ fn run_server(cli: Cli) -> anyhow::Result<()> {
     })
     .runtime_policy(oxibelt::RuntimePolicy::FromConfig)
     .process_policy(oxibelt::ProcessPolicy::Standalone)
-    .runtime_capabilities(capabilities)
+    .runtime_capabilities(available_capabilities())
     .build_owned()?
     .run()?;
   if result.outcome == oxibelt::server::ShutdownOutcome::Failed {
@@ -270,43 +257,11 @@ fn run_configuration_check(config: Config, override_warnings: Vec<String>) -> an
   let telemetry = oxibelt::runtime::init_telemetry(&config)?;
   config.log_worker_resolution();
   let worker_threads = config.runtime.workers.tokio;
-  let request = request_from_config(&config);
-  let compio_preflight = preflight_compio_for_startup(request.requested_preset, worker_threads);
-  let mut capabilities = available_capabilities(compio_preflight.driver);
-  if let Some(reason) = compio_preflight.failure_reason {
-    capabilities.compio_main = RuntimeCapability::Unavailable(reason);
-  }
-  capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
-  let mut topology = resolve_runtime_topology(request, capabilities)
-    .context("requested runtime topology cannot be activated")?;
-  let mut active_runtime = active_runtime_for_topology(&topology);
-  let runtime = match build_main_runtime(active_runtime, worker_threads) {
-    Ok(runtime) => runtime,
-    Err(_error)
-      if request.requested_preset == RuntimeRequestedPreset::Auto
-        && request.policy == RuntimeTopologyPolicy::AllowFallback
-        && active_runtime == ActiveMainRuntime::Compio =>
-    {
-      tracing::warn!(
-        reason = RuntimeTopologyReason::CompioRuntimeBuildFailed.as_str(),
-        worker_threads,
-        "runtime topology capability changed during activation; resolving once more"
-      );
-      capabilities.compio_main =
-        RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioRuntimeBuildFailed);
-      capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
-      topology = resolve_runtime_topology(request, capabilities)
-        .context("fallback runtime topology cannot be activated")?;
-      active_runtime = active_runtime_for_topology(&topology);
-      build_main_runtime(active_runtime, worker_threads).with_context(|| {
-        format!(
-          "fallback runtime build failed after {}",
-          RuntimeTopologyReason::CompioRuntimeBuildFailed.as_str()
-        )
-      })?
-    }
-    Err(error) => return Err(error.context("resolved main runtime failed to build")),
-  };
+  let topology = resolve_runtime_topology(request_from_config(&config), available_capabilities())
+    .context("requested Tokio topology cannot be activated")?;
+  let runtime = startup_stage("runtime_tokio_hyper_build", || {
+    MainRuntime::build_tokio(worker_threads)
+  })?;
   oxibelt::runtime::backend::set_runtime_backend_snapshot(topology.legacy_backend_snapshot());
   runtime.block_on(async move {
     startup_stage_async(
@@ -336,108 +291,6 @@ async fn build_app_handle(
   .context("application state initialization task failed")?
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CompioStartupPreflight {
-  driver: Option<CompioDriverSelection>,
-  failure_reason: Option<RuntimeTopologyReason>,
-}
-
-fn preflight_compio_for_startup(
-  requested_preset: RuntimeRequestedPreset,
-  worker_threads: usize,
-) -> CompioStartupPreflight {
-  if requested_preset == RuntimeRequestedPreset::TokioHyper {
-    return CompioStartupPreflight {
-      driver: None,
-      failure_reason: None,
-    };
-  }
-  let driver = match startup_capability_stage(
-    "compio_probe_runtime_build",
-    RuntimeTopologyReason::CompioProbeFailed,
-    run_compio_probe_child,
-  ) {
-    Ok(driver) => driver,
-    Err(_) => {
-      tracing::warn!(
-        reason = RuntimeTopologyReason::CompioProbeFailed.as_str(),
-        worker_threads,
-        "Compio runtime capability preflight failed"
-      );
-      return CompioStartupPreflight {
-        driver: None,
-        failure_reason: Some(RuntimeTopologyReason::CompioProbeFailed),
-      };
-    }
-  };
-  if requested_preset == RuntimeRequestedPreset::Auto
-    && !compio_driver_safe_for_auto_main_runtime(driver)
-  {
-    tracing::warn!(
-      driver = driver.as_str(),
-      reason = RuntimeTopologyReason::UnsafeCompioDriver.as_str(),
-      worker_threads,
-      "Compio probe selected a driver that is unsafe for automatic activation"
-    );
-    return CompioStartupPreflight {
-      driver: Some(driver),
-      failure_reason: Some(RuntimeTopologyReason::UnsafeCompioDriver),
-    };
-  }
-
-  match startup_capability_stage(
-    "main_compio_runtime_build",
-    RuntimeTopologyReason::CompioRuntimeBuildFailed,
-    || run_compio_main_child(worker_threads),
-  ) {
-    Ok(()) => CompioStartupPreflight {
-      driver: Some(driver),
-      failure_reason: None,
-    },
-    Err(_) => {
-      tracing::warn!(
-        reason = RuntimeTopologyReason::CompioRuntimeBuildFailed.as_str(),
-        worker_threads,
-        "Compio main runtime capability preflight failed"
-      );
-      CompioStartupPreflight {
-        driver: None,
-        failure_reason: Some(RuntimeTopologyReason::CompioRuntimeBuildFailed),
-      }
-    }
-  }
-}
-
-fn compio_driver_safe_for_auto_main_runtime(driver: CompioDriverSelection) -> bool {
-  matches!(
-    driver,
-    CompioDriverSelection::IoUring | CompioDriverSelection::Iocp
-  )
-}
-
-fn active_runtime_for_topology(topology: &RuntimeTopologySnapshot) -> ActiveMainRuntime {
-  match topology.resolved_preset {
-    RuntimeResolvedPreset::HybridCompio => ActiveMainRuntime::Compio,
-    RuntimeResolvedPreset::TokioHyper | RuntimeResolvedPreset::External => {
-      ActiveMainRuntime::TokioHyper
-    }
-  }
-}
-
-fn build_main_runtime(
-  active_runtime: ActiveMainRuntime,
-  worker_threads: usize,
-) -> anyhow::Result<MainRuntime> {
-  match active_runtime {
-    ActiveMainRuntime::Compio => startup_stage("runtime_compio_build", || {
-      MainRuntime::build_compio(worker_threads)
-    }),
-    ActiveMainRuntime::TokioHyper => startup_stage("runtime_tokio_hyper_build", || {
-      MainRuntime::build_tokio(worker_threads)
-    }),
-  }
-}
-
 fn startup_stage<T>(
   name: &'static str,
   action: impl FnOnce() -> anyhow::Result<T>,
@@ -456,30 +309,6 @@ fn startup_stage<T>(
       elapsed_ms = started.elapsed().as_millis(),
       error = %error,
       "startup stage failed"
-    ),
-  }
-  result
-}
-
-fn startup_capability_stage<T>(
-  name: &'static str,
-  failure_reason: RuntimeTopologyReason,
-  action: impl FnOnce() -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-  let started = Instant::now();
-  tracing::info!(startup_stage = name, "startup capability stage started");
-  let result = action();
-  match &result {
-    Ok(_) => tracing::info!(
-      startup_stage = name,
-      elapsed_ms = started.elapsed().as_millis(),
-      "startup capability stage completed"
-    ),
-    Err(_) => tracing::error!(
-      startup_stage = name,
-      elapsed_ms = started.elapsed().as_millis(),
-      reason = failure_reason.as_str(),
-      "startup capability stage failed"
     ),
   }
   result

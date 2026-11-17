@@ -54,8 +54,6 @@ const CASE_ORDER: &[(&str, &str)] = &[
   ("http-semantics", "early-hints-pass"),
   ("http-semantics", "response-digest-wire-matrix"),
   ("http-semantics", "response-digest-trailers-drop"),
-  ("http-semantics", "compio-response-engine"),
-  ("http-semantics", "compio-transport-service"),
   ("http-semantics", "expect-priority"),
   ("http-semantics", "incremental-rfc10036"),
   ("http-semantics", "managed-upload-real-wire"),

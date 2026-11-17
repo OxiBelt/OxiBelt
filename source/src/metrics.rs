@@ -4,7 +4,7 @@ use crate::config::{MetricsConfig, MetricsDetail};
 use crate::tls::TlsServerSessionStorageStats;
 use http::StatusCode;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 mod admin_audit;
 mod admin_membership;
@@ -12,7 +12,6 @@ mod auth;
 mod bandwidth;
 pub use bandwidth::BandwidthTrafficClass;
 mod backend_failure;
-pub(crate) mod compio_direct_h1;
 mod crlite;
 mod ct;
 pub(crate) use ct::CtRejectionReason;
@@ -108,7 +107,6 @@ pub struct Metrics {
   stream: stream::StreamMetrics,
   shared_state: shared_state::SharedStateMetrics,
   backend_failure: backend_failure::BackendFailureMetrics,
-  compio_direct_h1: compio_direct_h1::CompioDirectH1Metrics,
   pool: pool::PoolMetrics,
   detailed: Mutex<detail::DetailedMetrics>,
 }
@@ -134,20 +132,6 @@ impl Default for PaddedAtomicU64 {
 }
 
 #[derive(Debug)]
-#[repr(align(64))]
-struct PaddedAtomicI64 {
-  value: AtomicI64,
-}
-
-impl Default for PaddedAtomicI64 {
-  fn default() -> Self {
-    Self {
-      value: AtomicI64::new(0),
-    }
-  }
-}
-
-#[derive(Debug)]
 struct StripedCounter {
   stripes: [PaddedAtomicU64; COUNTER_STRIPES],
 }
@@ -157,48 +141,6 @@ impl Default for StripedCounter {
     Self {
       stripes: std::array::from_fn(|_| PaddedAtomicU64::default()),
     }
-  }
-}
-
-#[derive(Debug)]
-struct StripedGauge {
-  stripes: [PaddedAtomicI64; COUNTER_STRIPES],
-}
-
-impl Default for StripedGauge {
-  fn default() -> Self {
-    Self {
-      stripes: std::array::from_fn(|_| PaddedAtomicI64::default()),
-    }
-  }
-}
-
-impl StripedGauge {
-  fn adjust(&self, delta: isize) {
-    COUNTER_STRIPE.with(|stripe| {
-      self.stripes[*stripe]
-        .value
-        .fetch_add(delta as i64, Ordering::Relaxed);
-    });
-  }
-
-  fn load(&self) -> u64 {
-    let total = self
-      .stripes
-      .iter()
-      .map(|stripe| i128::from(stripe.value.load(Ordering::Relaxed)))
-      .sum::<i128>();
-    total.clamp(0, i128::from(u64::MAX)) as u64
-  }
-
-  #[cfg(test)]
-  fn set(&self, value: usize) {
-    for stripe in &self.stripes {
-      stripe.value.store(0, Ordering::Relaxed);
-    }
-    self.stripes[0]
-      .value
-      .store(i64::try_from(value).unwrap_or(i64::MAX), Ordering::Relaxed);
   }
 }
 
@@ -913,7 +855,6 @@ impl Metrics {
     self.append_ocsp_prometheus(&mut output);
     self.append_outbound_revocation_prometheus(&mut output);
     self.append_fast_path_prometheus(&mut output);
-    self.compio_direct_h1.append_prometheus(&mut output);
     self.append_upstream_client_prometheus(&mut output);
     self.append_http_io_prometheus(&mut output);
     self.http3_upstream.append_prometheus(&mut output);

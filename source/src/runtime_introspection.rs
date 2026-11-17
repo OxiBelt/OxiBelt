@@ -14,7 +14,7 @@ use crate::diagnostics::{RuntimeSnapshot, build_runtime_snapshot};
 use crate::state::AppSnapshot;
 
 #[cfg(feature = "admin-runtime")]
-const RUNTIME_INTROSPECTION_FORMAT_VERSION: u32 = 3;
+const RUNTIME_INTROSPECTION_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Default)]
 pub struct RuntimeIntrospectionState {

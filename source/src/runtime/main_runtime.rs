@@ -6,41 +6,25 @@ use std::time::Instant;
 use anyhow::Context;
 use tokio::runtime::{Builder, Runtime};
 
-use super::compio::CompioRuntime;
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ActiveMainRuntime {
-  Compio,
   TokioHyper,
 }
 
 impl ActiveMainRuntime {
   pub const fn as_str(self) -> &'static str {
     match self {
-      Self::Compio => "compio",
       Self::TokioHyper => "tokio_hyper",
     }
   }
 }
 
-enum MainRuntimeInner {
-  Compio(CompioRuntime),
-  Tokio(Runtime),
-}
-
 pub struct MainRuntime {
   active: ActiveMainRuntime,
-  inner: MainRuntimeInner,
+  inner: Runtime,
 }
 
 impl MainRuntime {
-  pub fn build_compio(worker_threads: usize) -> anyhow::Result<Self> {
-    Ok(Self {
-      active: ActiveMainRuntime::Compio,
-      inner: MainRuntimeInner::Compio(super::compio::build_runtime(worker_threads)?),
-    })
-  }
-
   pub fn build_tokio(worker_threads: usize) -> anyhow::Result<Self> {
     let started = Instant::now();
     tracing::info!(
@@ -73,7 +57,7 @@ impl MainRuntime {
     let runtime = runtime?;
     Ok(Self {
       active: ActiveMainRuntime::TokioHyper,
-      inner: MainRuntimeInner::Tokio(runtime),
+      inner: runtime,
     })
   }
 
@@ -85,9 +69,6 @@ impl MainRuntime {
   where
     F: Future,
   {
-    match &self.inner {
-      MainRuntimeInner::Compio(runtime) => runtime.block_on_tokio_island(future),
-      MainRuntimeInner::Tokio(runtime) => runtime.block_on(future),
-    }
+    self.inner.block_on(future)
   }
 }

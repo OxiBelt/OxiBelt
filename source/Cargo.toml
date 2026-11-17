@@ -95,8 +95,6 @@ x509-cert-v2 = { package = "x509-cert", version = "0.2.5" }
 x509-ocsp = { version = "0.2.1", features = ["builder"] }
 zstd.workspace = true
 zeroize = "1.9.1"
-compio = { version = "0.19.2", default-features = false, features = ["bytes", "io-uring", "polling", "runtime", "time"] }
-compio-driver = { version = "0.12.5", default-features = false, features = ["io-uring", "polling"] }
 crc32fast = "1.5.3"
 memchr = "2.8.3"
 online-dsl-forge = "0.3.5"

@@ -160,34 +160,6 @@ pub(super) fn apply_priority_policy(headers: &mut HeaderMap, mode: PriorityMode)
   }
 }
 
-#[cfg(test)]
-pub(crate) fn attach_early_hints_capture<B>(
-  request: &mut Request<B>,
-  mode: EarlyHintsMode,
-) -> Option<EarlyHintsCapture> {
-  if mode == EarlyHintsMode::Drop {
-    return None;
-  }
-  let capture = EarlyHintsCapture::default();
-  let callback_capture = capture.clone();
-  hyper::ext::on_informational(request, move |response| {
-    let mut interim = callback_capture
-      .inner
-      .lock()
-      .unwrap_or_else(|poisoned| poisoned.into_inner());
-    // Hyper owns the informational-response parser, so retain its established
-    // capture behavior. Bounded protocol engines pass their validated limit.
-    let _ = capture_early_hint(
-      &mut interim,
-      mode,
-      response.status(),
-      response.headers(),
-      usize::MAX,
-    );
-  });
-  Some(capture)
-}
-
 /// Attach the one upstream informational callback used for both existing 103
 /// capture and interop-9 live 104 relay.
 ///

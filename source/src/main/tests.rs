@@ -74,28 +74,8 @@ fn lifecycle_prestop_parser_leaves_public_cli_unchanged() {
 }
 
 #[test]
-fn auto_main_runtime_treats_polling_compio_driver_as_unsafe() {
-  assert!(!compio_driver_safe_for_auto_main_runtime(
-    CompioDriverSelection::Polling
-  ));
-}
-
-#[test]
-fn auto_main_runtime_allows_production_compio_drivers() {
-  assert!(compio_driver_safe_for_auto_main_runtime(
-    CompioDriverSelection::IoUring
-  ));
-  assert!(compio_driver_safe_for_auto_main_runtime(
-    CompioDriverSelection::Iocp
-  ));
-}
-
-#[test]
-fn active_main_runtime_projection_follows_the_resolved_topology() {
-  let topology = RuntimeTopologySnapshot::external();
-
-  assert_eq!(
-    active_runtime_for_topology(&topology),
-    ActiveMainRuntime::TokioHyper
-  );
+fn obsolete_runtime_probe_commands_are_rejected() {
+  for probe in ["compio-probe", "compio-main"] {
+    assert!(Cli::try_parse_from(["oxibelt", "__runtime-probe", probe]).is_err());
+  }
 }

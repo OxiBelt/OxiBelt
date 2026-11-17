@@ -70,9 +70,8 @@ let result = handle
 
 `RuntimePolicy::CurrentRuntime` requires a current Tokio runtime. It never
 constructs, replaces, or resizes that runtime and never claims that configured
-Tokio or Compio worker allocations apply to it. The startup report marks
-main-runtime, topology-policy, executor-worker, and Compio-worker settings as
-`Inapplicable`; OxiBelt-owned accept and QUIC worker allocations remain
+Tokio executor-worker allocations apply to it. The startup report marks
+executor-worker settings as `Inapplicable`; OxiBelt-owned accept and QUIC worker allocations remain
 applicable and report their actual values.
 
 ## Process-global hooks

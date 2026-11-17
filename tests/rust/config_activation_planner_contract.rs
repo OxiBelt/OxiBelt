@@ -43,7 +43,7 @@ fn public_schema_v3_report_matches_the_exact_api_snapshot() {
     serde_json::to_value(&report).expect("activation report should serialize"),
     json!({
       "activation_plan_schema_version": 3,
-      "native_schema_epoch": 1,
+      "native_schema_epoch": 2,
       "ok": true,
       "basis": "offline_config",
       "changes": [

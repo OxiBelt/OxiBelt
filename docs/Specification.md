@@ -129,9 +129,9 @@ authentication decision; release tag, commit, workflow identity, artifact
 digest, and provenance establish trust. Admin version metadata, capabilities,
 runtime introspection, support bundles, cluster build fencing, executable
 `--version`, OCI labels, and release artifact contracts consume this canonical
-identity. Runtime introspection uses format version `3` to add aggregate,
+identity. Runtime introspection uses format version `4` and includes aggregate,
 redacted TURN UDP-client and allocation counters; the confinement contract
-advances the support-bundle format to version `3` to add bounded, redacted
+uses support-bundle format version `4` to add bounded, redacted
 hardening evidence. Public readiness and liveness responses retain their
 existing non-identifying contract.
 
@@ -162,7 +162,18 @@ Ordinary data-plane responses support built-in [RFC 9530 digest negotiation](htt
 
 HTTP semantics controls preserve compatibility across common edge cases. OxiBelt accepts `Expect: 100-continue` in automatic mode, rejects unsupported `Expect` values with `417`, can strip or pass RFC 9218 `Priority` headers, and can drop ordinary HTTP trailer frames while preserving native gRPC trailers. `text/event-stream` responses remain streaming by default even when route response buffering is enabled. Native gRPC requests preserve `grpc-status` and `grpc-message` trailers, can honor `grpc-timeout`, and receive gRPC status trailers for proxy-generated upstream failures. A client-requested gRPC deadline that expires before OxiBelt's configured upstream first-byte timeout is treated as a client deadline expiry and does not increment passive upstream-pool health failures.
 
-Runtime topology is explicit. The canonical default `hybrid_compio` owns one Compio bootstrap driver around a Tokio compatibility island; Tokio owns orchestration, TCP accept, general HTTP, HTTP/3 and QUIC, DNS and discovery, timers, background/control tasks, and blocking work, while Compio owns direct-H1 transport only when its Linux-only experimental worker fleet is active. Legacy `compio` aliases this topology with a diagnostic. `[runtime.workers].tokio`, `[runtime.workers].compio_direct_h1`, TCP accept workers, and QUIC socket workers accept explicit positive counts or `"auto"`; auto uses `std::thread::available_parallelism()`, the matching `[runtime.worker_multipliers]` value, round-up, and a one-worker detection fallback. Legacy `runtime.worker_threads` and multiplier `runtime` fill only omitted owner-specific values. A changed main topology or Tokio count requires process restart; a direct-H1 backend/count change may full-reload only after the replacement fleet is staged, while accept and QUIC changes retain listener-rebind behavior. `topology_policy = "require_exact"` rejects a candidate that would fall back. When accept or QUIC resolves above one, the matching `reuse_port` setting is required. Kernel sysctl and file-limit changes remain outside the binary; the optional `kernel-extension/` installer stages Linux 7.0.x+ host tuning separately.
+Tokio/Hyper is the sole runtime and direct-H1 transport. Tokio owns startup,
+TCP accept, general HTTP, HTTP/3 and QUIC, DNS/discovery, timers, and background
+and blocking work. Embedded execution uses the caller-owned Tokio runtime.
+Native configuration epoch `2` removes runtime selectors and Compio worker
+settings; explicit migration from epoch `0` or `1` is required for those
+settings. Tokio, TCP accept, and QUIC socket workers accept positive counts or
+`"auto"`, preserving CPU detection, round-up, multipliers, and the one-worker
+fallback. Legacy Tokio worker aliases remain accepted. Tokio worker count
+changes require restart; accept and QUIC changes retain listener rebinds and
+require `reuse_port` for multiple workers. Runtime topology schema `3` removes
+compatibility boundaries and obsolete driver fields. Kernel tuning remains
+outside the binary.
 
 ## Protocol Behavior
 
@@ -484,7 +495,7 @@ Lifecycle endpoints are:
 - `POST /admin/v1/lifecycle/undrain`: requires `lifecycle:Undrain`, clears admin drain.
 - `GET /admin/v1/diagnostics/support-bundle?redact=true`: requires `diagnostics:ReadSupportBundle`, returns a redacted JSON support bundle with config status, redacted effective config when available, doctor output, runtime snapshot, WAF telemetry summaries, dynamic-policy summary, and Prometheus text. Optional `external_probe=KIND` query parameters require the same probe permissions as diagnostics preflight.
 - `GET /admin/v1/runtime/snapshot?redact=true`: requires `runtime:ReadSnapshot`, returns the redacted runtime snapshot section used by the support bundle.
-- `GET /admin/v1/runtime/introspection?redact=true`: requires `runtime:ReadIntrospection`, returns runtime-introspection format version `3` with the redacted runtime snapshot plus live active counters for downstream connections, HTTP/1.1 requests, HTTP/2 streams, HTTP/3 requests, WebSocket tunnels, WebTransport sessions, stream listener TCP connections, stream listener UDP flows, TURN TCP/TLS connections, TURN UDP clients, and TURN relay allocations.
+- `GET /admin/v1/runtime/introspection?redact=true`: requires `runtime:ReadIntrospection`, returns runtime-introspection format version `4` with the redacted runtime snapshot plus live active counters for downstream connections, HTTP/1.1 requests, HTTP/2 streams, HTTP/3 requests, WebSocket tunnels, WebTransport sessions, stream listener TCP connections, stream listener UDP flows, TURN TCP/TLS connections, TURN UDP clients, and TURN relay allocations.
 - `GET /admin/v1/waf/rule-hits`, `GET /admin/v1/waf/rule-costs`, and `GET /admin/v1/waf/crs/compatibility`: require the matching `waf:GetRuleHits`, `waf:GetRuleCosts`, and `waf:GetCrsCompatibility` actions.
 - `POST /admin/v1/waf/rulepacks/plan`: requires `waf:PlanOxiRulePack`; route candidate inventory additionally requires `config:ReadRouteInventory`, content diff additionally requires `waf:ListOxiRulePacks`, and cost estimation additionally requires `waf:EstimateOxiRuleCost`. The endpoint is non-mutating, accepts schema version `2` rulepacks only, and returns route candidates without upstream origins, credentials, TLS details, token environment variables, or file paths.
 - `POST /admin/v1/waf/oxirule/check`, `test`, `explain`, `cost`, and `replay`: require `waf:CheckOxiRule`, `waf:TestOxiRule`, `waf:ExplainOxiRule`, `waf:EstimateOxiRuleCost`, or `waf:ReplayOxiRule`; `check` also requires `waf:CheckOxiRuleGroup` when group candidates are supplied. Requests with `include_active_rules = true` require the same action on `oxirule/*`, except replay uses `replay/*`. These endpoints are synchronous, stateless, and never write OxiRule files.

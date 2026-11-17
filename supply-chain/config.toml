@@ -94,10 +94,6 @@ criteria = "safe-to-deploy"
 version = "0.5.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.arrayvec]]
-version = "0.7.8"
-criteria = "safe-to-deploy"
-
 [[exemptions.ascii-canvas]]
 version = "4.0.0"
 criteria = "safe-to-deploy"
@@ -262,48 +258,12 @@ criteria = "safe-to-deploy"
 version = "4.6.7"
 criteria = "safe-to-deploy"
 
-[[exemptions.compio]]
-version = "0.19.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-buf]]
-version = "0.8.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-driver]]
-version = "0.12.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-executor]]
-version = "0.1.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-io]]
-version = "0.10.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-log]]
-version = "0.2.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-runtime]]
-version = "0.12.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.compio-send-wrapper]]
-version = "0.7.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.compression-codecs]]
 version = "0.4.38"
 criteria = "safe-to-deploy"
 
 [[exemptions.compression-core]]
 version = "0.4.32"
-criteria = "safe-to-deploy"
-
-[[exemptions.concurrent-queue]]
-version = "2.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.const-oid]]
@@ -534,10 +494,6 @@ criteria = "safe-to-deploy"
 version = "0.4.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.flume]]
-version = "0.12.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.fraction]]
 version = "0.16.0"
 criteria = "safe-to-deploy"
@@ -624,10 +580,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.heck]]
 version = "0.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.hermit-abi]]
-version = "0.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.hkdf]]
@@ -732,10 +684,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.inout]]
 version = "0.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.io-uring]]
-version = "0.7.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.ipnet]]
@@ -866,10 +814,6 @@ criteria = "safe-to-deploy"
 version = "0.8.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.local-event]]
-version = "0.1.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.lock_api]]
 version = "0.4.14"
 criteria = "safe-to-deploy"
@@ -924,10 +868,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.mio]]
 version = "1.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.mod_use]]
-version = "0.2.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.new_debug_unreachable]]
@@ -1026,10 +966,6 @@ criteria = "safe-to-deploy"
 version = "0.5.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.pastey]]
-version = "0.2.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.pem]]
 version = "3.0.6"
 criteria = "safe-to-deploy"
@@ -1072,10 +1008,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.pkg-config]]
 version = "0.3.34"
-criteria = "safe-to-deploy"
-
-[[exemptions.polling]]
-version = "3.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.poly1305]]
@@ -1359,10 +1291,6 @@ criteria = "safe-to-deploy"
 version = "0.4.12"
 criteria = "safe-to-deploy"
 
-[[exemptions.slotmap]]
-version = "1.1.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.socket2]]
 version = "0.6.5"
 criteria = "safe-to-deploy"
@@ -1433,10 +1361,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.term]]
 version = "1.2.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.thin-cell]]
-version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.thiserror]]

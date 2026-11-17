@@ -916,7 +916,7 @@ baseline_for_primary_target() {
     return 65
   }
   jq -e --arg primary_target "${primary_target}" '
-    .schema_version == 33 and
+    (.schema_version == 33 or .schema_version == 34) and
     .profile == "benchmark" and
     .quorum.status == "pass" and
     (.quorum.violations | type == "array" and length == 0) and
@@ -925,7 +925,7 @@ baseline_for_primary_target() {
     .regression_gates.accepted_regression.status == "inactive" and
     .primary_target_cpu == $primary_target
   ' "${candidate}" >/dev/null || {
-    echo "--baseline-report is not a passing, unaccepted schema-33 ${primary_target} aggregate: ${candidate}" >&2
+    echo "--baseline-report is not a passing, unaccepted schema-33/34 ${primary_target} aggregate: ${candidate}" >&2
     return 65
   }
   printf '%s\n' "${candidate}"
@@ -1056,7 +1056,7 @@ aggregate_campaign() {
     if [[ "${aggregate_command_status}" == 124 || "${aggregate_command_status}" == 137 ]]; then
       timed_out=1
     fi
-    if [[ "${aggregate_status}" != 0 || ! -f "${report_json}" ]] || ! jq -e '.schema_version == 33' "${report_json}" >/dev/null; then
+    if [[ "${aggregate_status}" != 0 || ! -f "${report_json}" ]] || ! jq -e '.schema_version == 34' "${report_json}" >/dev/null; then
       echo "aggregate gate failed for ${primary_target}; see ${report_dir}/aggregate.log" >&2
       if [[ "${aggregate_status}" == 0 ]]; then
         aggregate_status=1

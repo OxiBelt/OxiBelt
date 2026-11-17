@@ -31,7 +31,6 @@ jobs:
           - turn_protocol
           - tls_client_hello
           - http_semantics
-          - compio_h1_response
           - http3_webtransport
           - http2_webtransport
           - upstream_dns_resolution

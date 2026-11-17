@@ -1005,8 +1005,8 @@
         "inline": {
           "type": "string",
           "contentMediaType": "application/toml",
-          "x-oxibelt-native-schema": "../../../source/assets/oxibelt-config-v1.schema.json",
-          "x-oxibelt-native-schema-epoch": 1
+          "x-oxibelt-native-schema": "../../../source/assets/oxibelt-config-v2.schema.json",
+          "x-oxibelt-native-schema-epoch": 2
         }
       }
     },

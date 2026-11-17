@@ -43,12 +43,41 @@ fn schema_node_for_metadata_path<'a>(
 fn checked_metadata_generator_matches_the_embedded_versioned_schema() {
   let generated = generate_native_config_schema().expect("native schema should generate");
   let committed =
-    fs::read_to_string(repo_root().join("source/assets/oxibelt-config-v1.schema.json"))
-      .expect("versioned native schema should be readable");
+    fs::read_to_string(repo_root().join("source/assets/oxibelt-config-v2.schema.json"))
+      .expect("current native schema should be readable");
   assert_eq!(generated, committed, "regenerate the native config schema");
   assert_eq!(
-    native_config_schema(1).expect("schema epoch 1 should be embedded"),
+    native_config_schema(2).expect("schema epoch 2 should be embedded"),
     committed
+  );
+  let archived =
+    fs::read_to_string(repo_root().join("source/assets/oxibelt-config-v1.schema.json"))
+      .expect("archived native schema should be readable");
+  assert_eq!(
+    native_config_schema(1).expect("schema epoch 1 should remain exportable"),
+    archived,
+    "epoch 1 export must remain byte-for-byte archived"
+  );
+  let current: serde_json::Value = serde_json::from_str(&generated).expect("schema JSON");
+  let runtime = &current["properties"]["runtime"]["properties"];
+  for removed in ["main_runtime", "direct_h1_io", "topology_policy"] {
+    assert!(runtime.get(removed).is_none(), "runtime.{removed}");
+  }
+  assert!(
+    runtime["workers"]["properties"]
+      .get("compio_direct_h1")
+      .is_none()
+  );
+  assert!(runtime["workers"]["properties"].get("tokio").is_some());
+  assert!(
+    runtime["worker_multipliers"]["properties"]
+      .get("compio_direct_h1")
+      .is_none()
+  );
+  assert!(
+    runtime["worker_multipliers"]["properties"]
+      .get("tokio")
+      .is_some()
   );
 }
 
@@ -61,10 +90,10 @@ fn helm_inline_toml_points_to_the_same_native_schema_epoch() {
   .expect("Helm values schema should be JSON");
   let inline = &values_schema["properties"]["config"]["properties"]["inline"];
   assert_eq!(inline["contentMediaType"], "application/toml");
-  assert_eq!(inline["x-oxibelt-native-schema-epoch"], 1);
+  assert_eq!(inline["x-oxibelt-native-schema-epoch"], 2);
   assert_eq!(
     inline["x-oxibelt-native-schema"],
-    "../../../source/assets/oxibelt-config-v1.schema.json"
+    "../../../source/assets/oxibelt-config-v2.schema.json"
   );
 }
 
@@ -106,19 +135,20 @@ fn managed_upload_schema_has_typed_profiles_and_credential_references() {
 }
 
 #[test]
-fn editor_and_documentation_surfaces_publish_the_epoch_one_contract() {
+fn editor_and_documentation_surfaces_publish_the_epoch_two_contract() {
   let taplo = fs::read_to_string(repo_root().join(".taplo.toml"))
     .expect("Taplo configuration should be readable");
-  assert!(taplo.contains("source/assets/oxibelt-config-v1.schema.json"));
+  assert!(taplo.contains("source/assets/oxibelt-config-v2.schema.json"));
   assert!(taplo.contains("source/config/**/*.toml"));
 
   let configuration = fs::read_to_string(repo_root().join("docs/Configuration.md"))
     .expect("configuration reference should be readable");
   for contract in [
-    "oxibeltctl config schema --epoch 1",
+    "oxibeltctl config schema --epoch 2",
     "oxibeltctl config validate",
     "oxibeltctl config explain",
     "oxibeltctl config migrate",
+    "--from 1 --to 2",
     "Config::load` plus `Config::validate",
   ] {
     assert!(
@@ -931,7 +961,7 @@ expected_writable_paths = ["{expected_writable_path}"]
     .expect("offline explain should include a preflight runtime plan");
   assert_eq!(runtime_resolution["basis"], "preflight");
   assert_eq!(runtime_resolution["activated"], false);
-  assert_eq!(runtime_resolution["canonical_preset"], "hybrid_compio");
+  assert_eq!(runtime_resolution["canonical_preset"], "tokio_hyper");
 
   let private_key = explain_native_config(&entry, "tls.private_key")
     .expect("private key field should be explainable");

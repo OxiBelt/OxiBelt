@@ -1,10 +1,10 @@
 use pretty_assertions::assert_eq;
 
 use super::{
-  ActivationPrerequisite, ActivationReasonCode, ChangeOperation, ConfigActivationChange,
-  ConfigComparisonKey, ConfigComparisonProjection, ConfinementDifference,
-  ConfinementDifferenceKind, MAX_ACTIVATION_CHANGES, MetadataProvenance, NativeActivation,
-  PlanningBasis, ResolvedActivationOperation, RollbackKind, plan_config_projections,
+  ActivationReasonCode, ChangeOperation, ConfigActivationChange, ConfigComparisonKey,
+  ConfigComparisonProjection, ConfinementDifference, ConfinementDifferenceKind,
+  MAX_ACTIVATION_CHANGES, MetadataProvenance, NativeActivation, PlanningBasis,
+  ResolvedActivationOperation, RollbackKind, plan_config_projections,
 };
 
 fn parsed(value: &str) -> toml::Value {
@@ -140,17 +140,18 @@ fn synthetic_change(
 }
 
 #[test]
-fn conditional_metadata_requires_runtime_context() {
+fn retained_runtime_worker_changes_require_restart() {
   let report = plan(
-    "[runtime]\nmain_runtime = 'tokio_hyper'\n",
-    "[runtime]\nmain_runtime = 'hybrid_compio'\n",
+    "[runtime.workers]\ntokio = 2\n",
+    "[runtime.workers]\ntokio = 4\n",
   );
 
   let change = &report.changes[0];
-  assert!(change.conditional);
+  assert!(!change.conditional);
+  assert!(change.missing_prerequisites.is_empty());
   assert_eq!(
-    change.missing_prerequisites,
-    vec![ActivationPrerequisite::RuntimeCapabilityContext]
+    change.resolved_operation,
+    ResolvedActivationOperation::ProcessRestart
   );
   assert!(!report.activation_plan.can_apply_in_process);
 }

@@ -344,6 +344,14 @@ fn data_plane_chart_metadata_and_values_are_valid() {
   let schema: Value = serde_json::from_str(&read_repo("deploy/helm/oxibelt/values.schema.json"))
     .expect("values.schema.json should parse as JSON");
   assert_eq!(
+    schema["properties"]["config"]["properties"]["inline"]["x-oxibelt-native-schema"],
+    "../../../source/assets/oxibelt-config-v2.schema.json"
+  );
+  assert_eq!(
+    schema["properties"]["config"]["properties"]["inline"]["x-oxibelt-native-schema-epoch"],
+    2
+  );
+  assert_eq!(
     schema["properties"]["image"]["properties"]["digest"]["pattern"],
     "^$|^sha256:[0-9a-f]{64}$"
   );

@@ -11,7 +11,6 @@ use aho_corasick::AhoCorasick;
 use criterion::{BenchmarkId, Criterion, Throughput};
 use memchr::{memchr, memchr_iter, memmem};
 
-use crate::proxy::http::fast_path::direct_h1::delimiters::find_delimiter;
 use crate::turn::protocol::crc32;
 
 const SEARCH_SIZES: [usize; 4] = [64, 4 * 1024, 64 * 1024, 1024 * 1024];
@@ -173,9 +172,7 @@ fn bench_delimiter_search(criterion: &mut Criterion) {
     group.bench_with_input(
       BenchmarkId::new("memmem", size),
       &haystack,
-      |bencher, haystack| {
-        bencher.iter(|| find_delimiter(black_box(haystack), black_box(delimiter)))
-      },
+      |bencher, haystack| bencher.iter(|| memmem::find(black_box(haystack), black_box(delimiter))),
     );
   }
   group.finish();

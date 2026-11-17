@@ -8371,11 +8371,11 @@
         "properties": {
           "report_schema_version": {
             "type": "integer",
-            "const": 3
+            "const": 4
           },
           "native_schema_epoch": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "ok": {
             "type": "boolean"
@@ -8807,7 +8807,7 @@
         "properties": {
           "format_version": {
             "type": "integer",
-            "const": 3
+            "const": 4
           },
           "redacted": {
             "type": "boolean",
@@ -9485,7 +9485,7 @@
           },
           "native_schema_epoch": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "ok": {
             "type": "boolean"
@@ -9524,11 +9524,11 @@
         "properties": {
           "report_schema_version": {
             "type": "integer",
-            "const": 3
+            "const": 4
           },
           "native_schema_epoch": {
             "type": "integer",
-            "const": 1
+            "const": 2
           },
           "ok": {
             "type": "boolean",

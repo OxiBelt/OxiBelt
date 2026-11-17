@@ -89,9 +89,7 @@ fn resolve_runtime_compatibility(
     }
     FullReloadCompatibility::RestartRequired(reason) => {
       let code = match reason {
-        FullReloadRestartReason::MainRuntime | FullReloadRestartReason::TokioWorkers => {
-          ActivationReasonCode::RuntimeNotResizable
-        }
+        FullReloadRestartReason::TokioWorkers => ActivationReasonCode::RuntimeNotResizable,
         _ => ActivationReasonCode::StartupOnlySubsystem,
       };
       promote(report, ResolvedActivationOperation::ProcessRestart, code);

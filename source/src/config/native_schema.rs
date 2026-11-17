@@ -10,11 +10,13 @@ use serde_json::{Map, json};
 #[cfg(feature = "config-tooling")]
 use super::{allowed_config_keys, shape::join_key_path};
 
-pub const NATIVE_CONFIG_SCHEMA_EPOCH: u32 = 1;
-pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 3;
+pub const NATIVE_CONFIG_SCHEMA_EPOCH: u32 = 2;
+pub const NATIVE_CONFIG_REPORT_SCHEMA_VERSION: u32 = 4;
 
-const NATIVE_CONFIG_SCHEMA_JSON: &str =
+const NATIVE_CONFIG_SCHEMA_V1_JSON: &str =
   include_str!(concat!(env!("OUT_DIR"), "/oxibelt-config-v1.schema.json"));
+const NATIVE_CONFIG_SCHEMA_V2_JSON: &str =
+  include_str!(concat!(env!("OUT_DIR"), "/oxibelt-config-v2.schema.json"));
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -408,16 +410,12 @@ const FIELD_METADATA: &[NativeConfigFieldMetadata] = &[
   restart("shared_state.backends[].redis_tls.certificate_compression.*"),
   restart("crypto.auxiliary_tls.certificate_compression"),
   restart("crypto.auxiliary_tls.certificate_compression.*"),
-  conditional("runtime.main_runtime"),
-  conditional("runtime.topology_policy"),
   restart("runtime.worker_threads"),
   conditional("runtime.workers"),
   restart("runtime.workers.tokio"),
-  full_reload("runtime.workers.compio_direct_h1"),
   conditional("runtime.worker_multipliers"),
   restart("runtime.worker_multipliers.runtime"),
   restart("runtime.worker_multipliers.tokio"),
-  full_reload("runtime.worker_multipliers.compio_direct_h1"),
   secret_restart(
     "runtime.hardening.filesystem_manifest.expected_digest",
     NativeConfigSecretClass::Literal,
@@ -593,10 +591,11 @@ const fn oxirule(path: &'static str) -> NativeConfigFieldMetadata {
 }
 
 pub fn native_config_schema(epoch: u32) -> anyhow::Result<&'static str> {
-  if epoch != NATIVE_CONFIG_SCHEMA_EPOCH {
-    bail!("unsupported native configuration schema epoch {epoch}");
+  match epoch {
+    1 => Ok(NATIVE_CONFIG_SCHEMA_V1_JSON),
+    2 => Ok(NATIVE_CONFIG_SCHEMA_V2_JSON),
+    _ => bail!("unsupported native configuration schema epoch {epoch}"),
   }
-  Ok(NATIVE_CONFIG_SCHEMA_JSON)
 }
 
 pub fn native_config_schema_value(epoch: u32) -> anyhow::Result<Value> {
@@ -711,13 +710,13 @@ fn generated_schema_value() -> Value {
     );
     root_object.insert(
       "$id".to_string(),
-      json!("urn:oxibelt:native-config-schema:v1"),
+      json!("urn:oxibelt:native-config-schema:v2"),
     );
     root_object.insert(
       "title".to_string(),
-      json!("OxiBelt native configuration v1"),
+      json!("OxiBelt native configuration v2"),
     );
-    root_object.insert("x-oxibelt-schema-version".to_string(), json!(1));
+    root_object.insert("x-oxibelt-schema-version".to_string(), json!(2));
     root_object.insert(
       "x-oxibelt-semantic-validator".to_string(),
       json!("Config::load + Config::validate"),
@@ -1216,7 +1215,6 @@ fn auto_integer_path(path: &str) -> bool {
     path,
     "runtime.worker_threads"
       | "runtime.workers.tokio"
-      | "runtime.workers.compio_direct_h1"
       | "runtime.accept.workers"
       | "quic.socket.workers"
   )
@@ -1477,10 +1475,6 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
       vec!["local_tls", "received_proxy"],
     ),
     (
-      "runtime.direct_h1_io",
-      vec!["auto", "tokio_hyper", "compio"],
-    ),
-    (
       "runtime.hardening.close_range",
       vec!["auto", "off", "required"],
     ),
@@ -1505,14 +1499,6 @@ fn enum_values(path: &str) -> Option<Vec<&'static str>> {
         "downstream_tls",
         "full",
       ],
-    ),
-    (
-      "runtime.main_runtime",
-      vec!["hybrid_compio", "tokio_hyper", "auto", "compio"],
-    ),
-    (
-      "runtime.topology_policy",
-      vec!["allow_fallback", "require_exact"],
     ),
     (
       "proxy.upstream_resolution.happy_eyeballs.mode",
@@ -1693,15 +1679,10 @@ fn default_value(path: &str) -> Option<Value> {
     | "turn_upstream_pools.servers.tls.enable_secp256r1mlkem768"
     | "shared_state.backends.redis_tls.enable_secp256r1mlkem768" => json!(false),
     "logging.level" => json!("info"),
-    "runtime.direct_h1_io" => json!("auto"),
     "runtime.hot_reload.mode" => json!("off"),
-    "runtime.main_runtime" => json!("hybrid_compio"),
-    "runtime.topology_policy" => json!("allow_fallback"),
     "runtime.worker_threads" => json!("auto"),
-    "runtime.workers.tokio" | "runtime.workers.compio_direct_h1" => json!("auto"),
-    "runtime.worker_multipliers.runtime"
-    | "runtime.worker_multipliers.tokio"
-    | "runtime.worker_multipliers.compio_direct_h1" => json!(1.0),
+    "runtime.workers.tokio" => json!("auto"),
+    "runtime.worker_multipliers.runtime" | "runtime.worker_multipliers.tokio" => json!(1.0),
     "shared_state.failure_policies.udp_flows" => json!("reject_new_only"),
     "shared_state.udp_flow_identity_key_env" => json!("OXIBELT_UDP_FLOW_IDENTITY_KEY"),
     "proxy.upstream_resolution.max_endpoint_count" => json!(16),

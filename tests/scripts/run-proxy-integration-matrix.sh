@@ -459,16 +459,6 @@ assert_body_jq() {
   fi
 }
 
-runtime_check_failed_only_auto_compio() {
-  local output="$1"
-  jq -e '
-    ([.stages[] | select(.status == "failed") | .name]) as $failed |
-    .ok == false
-    and ($failed | length) > 0
-    and all($failed[]; . == "compio_probe_runtime_build" or . == "main_compio_runtime_build")
-  ' <<<"${output}" >/dev/null
-}
-
 response_status_matches() {
   local response="$1"
   local expected_statuses="$2"
@@ -3788,12 +3778,8 @@ if [[ "${CASE_HARDENED_RUNTIME}" == "1" && "${CASE_EXPECT_START}" == "success" ]
   runtime_check_output="$(docker_start_stdout_only "${runtime_check_container}")" || runtime_check_status=$?
   if [[ "${runtime_check_status}" != "0" ]]; then
     append_container_stderr "${runtime_check_container}"
-    if runtime_check_failed_only_auto_compio "${runtime_check_output}"; then
-      echo "runtime-check reported Compio unavailable under hardened container; continuing with runtime.main_runtime=auto"
-    else
-      echo "${runtime_check_output}" >&2
-      fail_with_diagnostics "runtime-check failed under hardened container"
-    fi
+    echo "${runtime_check_output}" >&2
+    fail_with_diagnostics "runtime-check failed under hardened container"
   fi
 fi
 

@@ -11,8 +11,6 @@ use tracing::{info, warn};
 use crate::config::{Config, HotReloadMode, RuntimeOverrides, TlsConfig};
 use crate::proxy::http::fast_path::build_compiled_fast_path_actions;
 use crate::routes::RouteTable;
-#[cfg(test)]
-use crate::runtime::topology::RuntimeTopologyChangePlan;
 use crate::server::ListenerSupervisor;
 use crate::state::{AppHandle, AppSnapshot, RequestPathFeaturePlan};
 use crate::tls;
@@ -194,7 +192,6 @@ impl ReloadManager {
       config,
       web_bot_auth: active.web_bot_auth.clone(),
       secret_references: active.secret_references.clone(),
-      effective_direct_h1_io: active.effective_direct_h1_io,
       clients: active.clients.clone(),
       direct_h1_pools: active.direct_h1_pools.clone(),
       direct_h2_pools: active.direct_h2_pools.clone(),
@@ -202,12 +199,6 @@ impl ReloadManager {
       control_http: active.control_http.clone(),
       h3_clients: active.h3_clients.clone(),
       outbound_revocation: active.outbound_revocation.clone(),
-      compio_direct_h1_budget: active.compio_direct_h1_budget,
-      compio_direct_h1_overlap_budget: active.compio_direct_h1_overlap_budget.clone(),
-      direct_h1_plan_generation: active.direct_h1_plan_generation,
-      compio_direct_h1_service: active.compio_direct_h1_service.clone(),
-      staged_compio_direct_h1_service: None,
-      compio_direct_h1_fleet_reservation: active.compio_direct_h1_fleet_reservation.clone(),
       upstream_pool_generation,
       stream_pool_generation,
       limits: active.limits.clone(),
@@ -426,7 +417,6 @@ impl ReloadManager {
       config,
       web_bot_auth: active.web_bot_auth.clone(),
       secret_references: active.secret_references.clone(),
-      effective_direct_h1_io: active.effective_direct_h1_io,
       clients: active.clients.clone(),
       direct_h1_pools: active.direct_h1_pools.clone(),
       direct_h2_pools: active.direct_h2_pools.clone(),
@@ -434,12 +424,6 @@ impl ReloadManager {
       control_http: active.control_http.clone(),
       h3_clients: active.h3_clients.clone(),
       outbound_revocation: active.outbound_revocation.clone(),
-      compio_direct_h1_budget: active.compio_direct_h1_budget,
-      compio_direct_h1_overlap_budget: active.compio_direct_h1_overlap_budget.clone(),
-      direct_h1_plan_generation: active.direct_h1_plan_generation,
-      compio_direct_h1_service: active.compio_direct_h1_service.clone(),
-      staged_compio_direct_h1_service: None,
-      compio_direct_h1_fleet_reservation: active.compio_direct_h1_fleet_reservation.clone(),
       upstream_pool_generation,
       stream_pool_generation,
       limits: active.limits.clone(),
@@ -631,7 +615,6 @@ pub(crate) enum FullReloadCompatibility {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum FullReloadRestartReason {
-  MainRuntime,
   TokioWorkers,
   RuntimeHardening,
   HotReloadManager,
@@ -655,11 +638,6 @@ pub(crate) enum FullReloadRestartReason {
 impl FullReloadRestartReason {
   fn message(self, active: &Config, replacement: &Config) -> String {
     match self {
-      Self::MainRuntime => format!(
-        "full hot reload rejected because runtime.main_runtime would change the active main topology from {} to {}; restart OxiBelt to replace the main runtime",
-        active.runtime.main_runtime.canonical().as_str(),
-        replacement.runtime.main_runtime.canonical().as_str()
-      ),
       Self::TokioWorkers => format!(
         "full hot reload rejected because runtime.workers.tokio changed from {} to {}; restart OxiBelt to resize the Tokio executor",
         active.runtime.workers.tokio, replacement.runtime.workers.tokio
@@ -726,9 +704,6 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
   active: &Config,
   replacement: &Config,
 ) -> FullReloadCompatibility {
-  if replacement.runtime.main_runtime.canonical() != active.runtime.main_runtime.canonical() {
-    return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::MainRuntime);
-  }
   if replacement.runtime.workers.tokio != active.runtime.workers.tokio {
     return FullReloadCompatibility::RestartRequired(FullReloadRestartReason::TokioWorkers);
   }
@@ -792,20 +767,6 @@ pub(crate) fn classify_full_reload_runtime_compatibility(
     );
   }
   FullReloadCompatibility::InProcess
-}
-
-#[cfg(test)]
-pub(crate) fn classify_runtime_topology_change(
-  active: &Config,
-  replacement: &Config,
-) -> RuntimeTopologyChangePlan {
-  if replacement.runtime.main_runtime.canonical() != active.runtime.main_runtime.canonical()
-    || replacement.runtime.workers.tokio != active.runtime.workers.tokio
-  {
-    RuntimeTopologyChangePlan::RestartRequired
-  } else {
-    RuntimeTopologyChangePlan::InProcess
-  }
 }
 
 pub(crate) fn reload_downstream_tls_paths(config: &mut Config) -> anyhow::Result<()> {

@@ -33,7 +33,7 @@ const STAT_BAND_RPS_P10_REGRESSION_TOLERANCE_PERCENT: f64 = -5.0;
 const STAT_BAND_P99_P90_REGRESSION_TOLERANCE_PERCENT: f64 = 8.0;
 const QUORUM_VALID_SAMPLE_PERCENT: f64 = 0.80;
 const QUORUM_SHARD_PERCENT: f64 = 0.80;
-const COMPARISON_SCHEMA_VERSION: u32 = 33;
+const COMPARISON_SCHEMA_VERSION: u32 = 34;
 const DELTA_SCHEMA_VERSION: u32 = 2;
 const DEFAULT_AMD64_TARGET_CPU: &str = "x86-64-v3";
 const UNKNOWN_SERVING_TYPE: &str = "unknown";
@@ -60,17 +60,16 @@ const BODYFUL_COMPARATOR_SCENARIOS: [&str; 8] = [
   "post-16k-json-h3",
   "h3-multiplexed-bodyful",
 ];
-const SERVING_TYPES: [&str; 8] = [
+const SERVING_TYPES: [&str; 7] = [
   "reverse-proxy",
   "static-files",
   "oxibelt-features",
   "oxibelt-soak-stress",
   "accept-multipliers",
   "remote-signer",
-  "runtime-direct-h1",
   "metrics-mode",
 ];
-const RECOGNIZED_SERVING_TYPES: [&str; 10] = [
+const RECOGNIZED_SERVING_TYPES: [&str; 9] = [
   "reverse-proxy",
   "static-files",
   "oxibelt-features",
@@ -79,7 +78,6 @@ const RECOGNIZED_SERVING_TYPES: [&str; 10] = [
   "remote-signer",
   "pool-concurrency",
   "direct-h2-contention",
-  "runtime-direct-h1",
   "metrics-mode",
 ];
 
@@ -248,7 +246,6 @@ struct BenchmarkRow {
   direct_h1_pool_events: Option<BTreeMap<String, u64>>,
   direct_h2_pool_events: Option<BTreeMap<String, u64>>,
   direct_h1_io_backend: Option<TripleCounterMapValues>,
-  compio_direct_h1_connection_events: Option<BTreeMap<String, u64>>,
   static_fast_path_responses: Option<BTreeMap<String, BTreeMap<String, u64>>>,
   fast_path_stage_timing: Option<FastPathStageTimingSamples>,
 }
@@ -330,7 +327,6 @@ struct AggregateBuilder {
   direct_h1_pool_events: CounterMapAggregateBuilder,
   direct_h2_pool_events: CounterMapAggregateBuilder,
   direct_h1_io_backend: TripleCounterMapAggregateBuilder,
-  compio_direct_h1_connection_events: CounterMapAggregateBuilder,
   static_fast_path_responses: NestedCounterMapAggregateBuilder,
   fast_path_stage_timing: FastPathStageTimingAggregateBuilder,
 }
@@ -348,7 +344,6 @@ struct AggregateFastPathInput {
   direct_h1_pool: CounterMapAggregateBuilder,
   direct_h2_pool: CounterMapAggregateBuilder,
   direct_h1_io_backend: TripleCounterMapAggregateBuilder,
-  compio_direct_h1_connection_events: CounterMapAggregateBuilder,
   static_responses: NestedCounterMapAggregateBuilder,
   stage_timing: FastPathStageTimingAggregateBuilder,
 }
@@ -486,8 +481,6 @@ struct AggregateFastPathStats {
   direct_h2_pool: Option<CounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   direct_h1_io_backend: Option<TripleCounterMapAggregateStats>,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  compio_direct_h1_connection_events: Option<CounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   static_responses: Option<NestedCounterMapAggregateStats>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -774,38 +767,6 @@ struct DirectH2ContentionEvidence {
   direct_h2_pool_take_median_avg_ns: Option<f64>,
   direct_h2_connect_median_avg_ns: Option<f64>,
   direct_h2_capacity_wait_median_avg_ns: Option<f64>,
-  status: String,
-  reason: String,
-}
-
-#[derive(Clone, Serialize)]
-struct RuntimeDirectH1Comparison {
-  amd64_target_cpu: String,
-  workload: String,
-  protocol: String,
-  expected_experiment_backend: String,
-  control_scenario: String,
-  experiment_scenario: String,
-  control_sample_count: usize,
-  experiment_sample_count: usize,
-  control_median_rps: Option<f64>,
-  experiment_median_rps: Option<f64>,
-  experiment_rps_ratio_vs_control: Option<f64>,
-  control_median_cpu_time_per_request_ns: Option<f64>,
-  experiment_median_cpu_time_per_request_ns: Option<f64>,
-  experiment_cpu_time_per_request_ratio_vs_control: Option<f64>,
-  control_median_p99_ms: Option<f64>,
-  experiment_median_p99_ms: Option<f64>,
-  experiment_p99_ratio_vs_control: Option<f64>,
-  control_total_errors: u64,
-  experiment_total_errors: u64,
-  experiment_compio_selected: u64,
-  experiment_compio_fallback: u64,
-  experiment_compio_error: u64,
-  experiment_tokio_hyper_selected: u64,
-  control_tokio_hyper_pool_hit: u64,
-  experiment_compio_connection_reused: u64,
-  experiment_tokio_hyper_pool_hit: u64,
   status: String,
   reason: String,
 }
@@ -1240,7 +1201,6 @@ struct Report {
   pool_concurrency_experiments: Vec<PoolConcurrencyExperiment>,
   direct_h2_promotion_evidence: Vec<DirectH2PromotionEvidence>,
   direct_h2_contention_evidence: Vec<DirectH2ContentionEvidence>,
-  runtime_direct_h1_comparisons: Vec<RuntimeDirectH1Comparison>,
   text_search_diagnostics: Vec<TextSearchDiagnostic>,
   amd64_isa_comparisons: Vec<Amd64IsaComparison>,
   probe_h2load_comparisons: Vec<ProbeH2loadComparison>,
@@ -1416,9 +1376,6 @@ impl AggregateBuilder {
     if let Some(io_backend) = row.direct_h1_io_backend {
       self.direct_h1_io_backend.push(io_backend);
     }
-    if let Some(events) = row.compio_direct_h1_connection_events {
-      self.compio_direct_h1_connection_events.push(events);
-    }
     if let Some(responses) = row.static_fast_path_responses {
       self.static_fast_path_responses.push(responses);
     }
@@ -1453,7 +1410,6 @@ impl AggregateBuilder {
       direct_h1_pool: self.direct_h1_pool_events,
       direct_h2_pool: self.direct_h2_pool_events,
       direct_h1_io_backend: self.direct_h1_io_backend,
-      compio_direct_h1_connection_events: self.compio_direct_h1_connection_events,
       static_responses: self.static_fast_path_responses,
       stage_timing: self.fast_path_stage_timing,
     });
@@ -1506,7 +1462,6 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
   let direct_h1_pool = input.direct_h1_pool.finish();
   let direct_h2_pool = input.direct_h2_pool.finish();
   let direct_h1_io_backend = input.direct_h1_io_backend.finish();
-  let compio_direct_h1_connection_events = input.compio_direct_h1_connection_events.finish();
   let static_responses = input.static_responses.finish();
   let stage_timing = input.stage_timing.finish();
   if plain_proxy_h1.is_none()
@@ -1521,7 +1476,6 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     && direct_h1_pool.is_none()
     && direct_h2_pool.is_none()
     && direct_h1_io_backend.is_none()
-    && compio_direct_h1_connection_events.is_none()
     && static_responses.is_none()
     && stage_timing.is_none()
   {
@@ -1540,7 +1494,6 @@ fn aggregate_fast_path_stats(input: AggregateFastPathInput) -> Option<AggregateF
     direct_h1_pool,
     direct_h2_pool,
     direct_h1_io_backend,
-    compio_direct_h1_connection_events,
     static_responses,
     stage_timing,
   })
@@ -2206,8 +2159,6 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     regression_gate_thresholds.h1_fast_path_min_hit_rate,
   );
   let direct_h2_contention_evidence = build_direct_h2_contention_evidence(&aggregate_map);
-  let runtime_direct_h1_comparisons =
-    build_runtime_direct_h1_comparisons(&aggregate_map, &primary_target_cpu);
   let text_search_diagnostics =
     build_text_search_diagnostics(&aggregate_map, baseline_gate_context.as_ref());
   let probe_h2load_comparisons =
@@ -2286,7 +2237,6 @@ fn aggregate(input_dir: &Path, options: AggregateOptions<'_>) -> Report {
     pool_concurrency_experiments,
     direct_h2_promotion_evidence,
     direct_h2_contention_evidence,
-    runtime_direct_h1_comparisons,
     text_search_diagnostics,
     amd64_isa_comparisons,
     probe_h2load_comparisons,
@@ -3663,13 +3613,6 @@ fn parse_result_value(
       label,
       warnings,
     ),
-    compio_direct_h1_connection_events: parse_compio_direct_h1_connection_events(
-      object,
-      source_file,
-      row_index,
-      label,
-      warnings,
-    ),
     static_fast_path_responses: parse_static_fast_path_responses(
       object,
       source_file,
@@ -4028,34 +3971,6 @@ fn parse_direct_h1_io_backend(
       parsed_backends.insert(backend.clone(), parsed_outcomes);
     }
     parsed.insert(protocol.clone(), parsed_backends);
-  }
-  Some(parsed)
-}
-
-fn parse_compio_direct_h1_connection_events(
-  object: &serde_json::Map<String, Value>,
-  source_file: &str,
-  row_index: usize,
-  label: &str,
-  warnings: &mut WarningBag,
-) -> Option<BTreeMap<String, u64>> {
-  let events = object
-    .get("fast_path")
-    .and_then(Value::as_object)
-    .and_then(|fast_path| fast_path.get("compio_direct_h1"))
-    .and_then(Value::as_object)
-    .and_then(|service| service.get("connection_events"))
-    .and_then(Value::as_object)?;
-  let mut parsed = BTreeMap::new();
-  for (event, value) in events {
-    match value.as_u64() {
-      Some(count) => {
-        parsed.insert(event.clone(), count);
-      }
-      None => warnings.push(format!(
-        "{source_file} row {row_index} ({label}): fast_path.compio_direct_h1.connection_events.{event} is not an unsigned integer"
-      )),
-    }
   }
   Some(parsed)
 }
@@ -4615,113 +4530,6 @@ fn pool_concurrency_scenario_parts(scenario: &str) -> Option<(u64, u64, &str)> {
   Some((pool_cap.parse().ok()?, concurrency.parse().ok()?, protocol))
 }
 
-fn build_runtime_direct_h1_comparisons(
-  aggregates: &AggregateMap,
-  primary_target_cpu: &str,
-) -> Vec<RuntimeDirectH1Comparison> {
-  let workloads = [
-    ("h1", "h1", "compio"),
-    ("h2", "h2", "compio"),
-    ("h3", "h3", "compio"),
-    ("post-1k-json-h2", "h2", "tokio_hyper"),
-    ("chunked-post-16k-h1", "h1", "tokio_hyper"),
-  ];
-  let mut rows = Vec::new();
-
-  for (workload, protocol, expected_backend) in workloads {
-    let control_scenario = format!("runtime-direct-h1-control-{workload}");
-    let experiment_scenario = format!("runtime-direct-h1-experiment-{workload}");
-    let control = aggregates.get(&(
-      primary_target_cpu.to_owned(),
-      Comparator::Oxibelt,
-      control_scenario.clone(),
-    ));
-    let experiment = aggregates.get(&(
-      primary_target_cpu.to_owned(),
-      Comparator::Oxibelt,
-      experiment_scenario.clone(),
-    ));
-    if control.is_none() && experiment.is_none() {
-      continue;
-    }
-
-    let experiment_compio_selected =
-      direct_h1_io_backend_count(experiment, protocol, "compio", "selected");
-    let experiment_compio_fallback =
-      direct_h1_io_backend_count(experiment, protocol, "compio", "fallback");
-    let experiment_compio_error =
-      direct_h1_io_backend_count(experiment, protocol, "compio", "error");
-    let experiment_tokio_hyper_selected =
-      direct_h1_io_backend_count(experiment, protocol, "tokio_hyper", "selected");
-    let control_tokio_hyper_pool_hit = direct_h1_pool_event_count(control, "hit");
-    let experiment_compio_connection_reused =
-      compio_direct_h1_connection_event_count(experiment, "reused");
-    let experiment_tokio_hyper_pool_hit = direct_h1_pool_event_count(experiment, "hit");
-    let experiment_rps_ratio_vs_control = experiment
-      .zip(control)
-      .and_then(|(experiment, control)| ratio(experiment.median_rps, control.median_rps));
-    let experiment_cpu_time_per_request_ratio_vs_control =
-      experiment.zip(control).and_then(|(experiment, control)| {
-        ratio(
-          experiment.median_cpu_time_per_request_ns,
-          control.median_cpu_time_per_request_ns,
-        )
-      });
-    let experiment_p99_ratio_vs_control = experiment
-      .zip(control)
-      .and_then(|(experiment, control)| ratio(experiment.median_p99_ms, control.median_p99_ms));
-    let (status, reason) = runtime_direct_h1_comparison_status(
-      control,
-      experiment,
-      expected_backend,
-      experiment_compio_selected,
-      experiment_compio_fallback,
-      experiment_compio_error,
-      experiment_tokio_hyper_selected,
-      control_tokio_hyper_pool_hit,
-      experiment_compio_connection_reused,
-      experiment_tokio_hyper_pool_hit,
-      experiment_cpu_time_per_request_ratio_vs_control,
-      experiment_p99_ratio_vs_control,
-    );
-
-    rows.push(RuntimeDirectH1Comparison {
-      amd64_target_cpu: primary_target_cpu.to_owned(),
-      workload: workload.to_owned(),
-      protocol: protocol.to_owned(),
-      expected_experiment_backend: expected_backend.to_owned(),
-      control_scenario,
-      experiment_scenario,
-      control_sample_count: control.map_or(0, |row| row.sample_count),
-      experiment_sample_count: experiment.map_or(0, |row| row.sample_count),
-      control_median_rps: control.and_then(|row| row.median_rps),
-      experiment_median_rps: experiment.and_then(|row| row.median_rps),
-      experiment_rps_ratio_vs_control,
-      control_median_cpu_time_per_request_ns: control
-        .and_then(|row| row.median_cpu_time_per_request_ns),
-      experiment_median_cpu_time_per_request_ns: experiment
-        .and_then(|row| row.median_cpu_time_per_request_ns),
-      experiment_cpu_time_per_request_ratio_vs_control,
-      control_median_p99_ms: control.and_then(|row| row.median_p99_ms),
-      experiment_median_p99_ms: experiment.and_then(|row| row.median_p99_ms),
-      experiment_p99_ratio_vs_control,
-      control_total_errors: control.map_or(0, |row| row.total_errors),
-      experiment_total_errors: experiment.map_or(0, |row| row.total_errors),
-      experiment_compio_selected,
-      experiment_compio_fallback,
-      experiment_compio_error,
-      experiment_tokio_hyper_selected,
-      control_tokio_hyper_pool_hit,
-      experiment_compio_connection_reused,
-      experiment_tokio_hyper_pool_hit,
-      status,
-      reason,
-    });
-  }
-
-  rows
-}
-
 fn build_text_search_diagnostics(
   aggregates: &AggregateMap,
   baseline: Option<&BaselineGateContext>,
@@ -4795,153 +4603,6 @@ fn build_text_search_diagnostics(
     });
   }
   rows
-}
-
-#[allow(clippy::too_many_arguments)]
-fn runtime_direct_h1_comparison_status(
-  control: Option<&AggregateStats>,
-  experiment: Option<&AggregateStats>,
-  expected_backend: &str,
-  compio_selected: u64,
-  compio_fallback: u64,
-  compio_error: u64,
-  tokio_hyper_selected: u64,
-  control_tokio_hyper_pool_hit: u64,
-  compio_connection_reused: u64,
-  experiment_tokio_hyper_pool_hit: u64,
-  cpu_time_per_request_ratio: Option<f64>,
-  p99_ratio: Option<f64>,
-) -> (String, String) {
-  let (Some(control), Some(experiment)) = (control, experiment) else {
-    return (
-      "missing_evidence".to_owned(),
-      "matching control and experiment rows are required".to_owned(),
-    );
-  };
-  if control.sample_count < 3
-    || experiment.sample_count < 3
-    || control.skipped_count > 0
-    || experiment.skipped_count > 0
-  {
-    return (
-      "missing_evidence".to_owned(),
-      format!(
-        "at least 3 complete non-skipped samples are required for both rows; observed control={}, experiment={}",
-        control.sample_count, experiment.sample_count
-      ),
-    );
-  }
-  if control.total_errors > 0 || experiment.total_errors > 0 {
-    return (
-      "request_errors".to_owned(),
-      "control or experiment recorded request errors".to_owned(),
-    );
-  }
-  if control_tokio_hyper_pool_hit == 0 {
-    return (
-      "reuse_missing".to_owned(),
-      "control row did not record a reusable Tokio/Hyper direct-H1 pool hit".to_owned(),
-    );
-  }
-
-  let backend_matches = match expected_backend {
-    "compio" => {
-      compio_selected > 0
-        && compio_fallback == 0
-        && compio_error == 0
-        && tokio_hyper_selected == 0
-        && compio_connection_reused > 0
-    }
-    "tokio_hyper" => {
-      compio_selected == 0
-        && compio_fallback > 0
-        && compio_error == 0
-        && tokio_hyper_selected > 0
-        && experiment_tokio_hyper_pool_hit > 0
-    }
-    _ => false,
-  };
-  if !backend_matches {
-    return (
-      "backend_mismatch".to_owned(),
-      format!(
-        "expected {expected_backend} with reuse; observed compio selected={compio_selected}, fallback={compio_fallback}, error={compio_error}, reused={compio_connection_reused}, tokio_hyper selected={tokio_hyper_selected}, pool_hit={experiment_tokio_hyper_pool_hit}"
-      ),
-    );
-  }
-
-  if control.cpu_time_per_request_sample_count < 3
-    || experiment.cpu_time_per_request_sample_count < 3
-  {
-    return (
-      "missing_cpu_evidence".to_owned(),
-      format!(
-        "CPU/request evidence is unavailable or incomplete; at least 3 process-CPU samples are required for both rows, observed control={}, experiment={}; RPS is informational and is not a CPU/request substitute",
-        control.cpu_time_per_request_sample_count, experiment.cpu_time_per_request_sample_count
-      ),
-    );
-  }
-  let Some(cpu_time_per_request_ratio) = cpu_time_per_request_ratio else {
-    return (
-      "missing_cpu_evidence".to_owned(),
-      "paired median CPU time per request is unavailable; RPS is informational and is not a CPU/request substitute".to_owned(),
-    );
-  };
-  let Some(p99_ratio) = p99_ratio else {
-    return (
-      "missing_evidence".to_owned(),
-      "paired median p99 is unavailable".to_owned(),
-    );
-  };
-  if cpu_time_per_request_ratio > 1.03 || p99_ratio > 1.05 {
-    return (
-      "regression".to_owned(),
-      format!(
-        "experiment/control CPU/request ratio {cpu_time_per_request_ratio:.3} must be at most 1.030 and p99 ratio {p99_ratio:.3} must be at most 1.050"
-      ),
-    );
-  }
-
-  (
-    "pass".to_owned(),
-    format!(
-      "backend evidence matched {expected_backend}; experiment/control CPU/request {cpu_time_per_request_ratio:.3}, p99 {p99_ratio:.3}; RPS remains informational"
-    ),
-  )
-}
-
-fn direct_h1_io_backend_count(
-  aggregate: Option<&AggregateStats>,
-  protocol: &str,
-  backend: &str,
-  outcome: &str,
-) -> u64 {
-  aggregate
-    .and_then(|aggregate| aggregate.fast_path.as_ref())
-    .and_then(|fast_path| fast_path.direct_h1_io_backend.as_ref())
-    .and_then(|stats| stats.values.get(protocol))
-    .and_then(|backends| backends.get(backend))
-    .and_then(|outcomes| outcomes.get(outcome))
-    .copied()
-    .unwrap_or(0)
-}
-
-fn direct_h1_pool_event_count(aggregate: Option<&AggregateStats>, event: &str) -> u64 {
-  aggregate
-    .and_then(|aggregate| aggregate.fast_path.as_ref())
-    .and_then(|fast_path| fast_path.direct_h1_pool.as_ref())
-    .and_then(|events| events.values.get(event))
-    .copied()
-    .unwrap_or(0)
-}
-
-fn compio_direct_h1_connection_event_count(aggregate: Option<&AggregateStats>, event: &str) -> u64 {
-  aggregate
-    .and_then(|aggregate| aggregate.fast_path.as_ref())
-    .and_then(|fast_path| fast_path.compio_direct_h1_connection_events.as_ref())
-    .and_then(|events| events.values.get(event))
-    .copied()
-    .unwrap_or(0)
 }
 
 fn build_probe_h2load_comparisons(
@@ -8761,7 +8422,6 @@ fn render_markdown(report: &Report) -> String {
   write_pool_concurrency_experiment_table(&mut markdown, &report.pool_concurrency_experiments);
   write_direct_h2_promotion_evidence_table(&mut markdown, &report.direct_h2_promotion_evidence);
   write_direct_h2_contention_evidence_table(&mut markdown, &report.direct_h2_contention_evidence);
-  write_runtime_direct_h1_comparison_table(&mut markdown, &report.runtime_direct_h1_comparisons);
   write_text_search_diagnostic_table(&mut markdown, &report.text_search_diagnostics);
   write_direct_h1_pool_diagnostics_table(&mut markdown, report);
   write_direct_h2_pool_diagnostics_table(&mut markdown, report);
@@ -9041,63 +8701,6 @@ fn write_direct_h2_contention_evidence_table(
       format_optional_ns(row.direct_h2_capacity_wait_median_avg_ns),
       row.status,
       markdown_escape_cell(&row.reason),
-    )
-    .unwrap();
-  }
-  writeln!(markdown).unwrap();
-}
-
-fn write_runtime_direct_h1_comparison_table(
-  markdown: &mut String,
-  rows: &[RuntimeDirectH1Comparison],
-) {
-  writeln!(markdown, "\n## Runtime direct-H1 paired evidence\n").unwrap();
-  if rows.is_empty() {
-    writeln!(
-      markdown,
-      "No paired runtime direct-H1 control and experiment rows were found.\n"
-    )
-    .unwrap();
-    return;
-  }
-
-  writeln!(
-    markdown,
-    "| Workload | Protocol | Expected experiment backend | Samples control / experiment | Median RPS control / experiment | RPS ratio (informational) | Median CPU ns/request control / experiment | CPU/request ratio | Median p99 control / experiment | p99 ratio | Compio selected / fallback / error / reused | Hyper selected / control pool hit / experiment pool hit | Status | Reason |"
-  )
-  .unwrap();
-  writeln!(
-    markdown,
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"
-  )
-  .unwrap();
-  for row in rows {
-    writeln!(
-      markdown,
-      "| `{}` | `{}` | `{}` | `{}` / `{}` | {} / {} | {} | {} / {} | {} | {} / {} | {} | `{}` / `{}` / `{}` / `{}` | `{}` / `{}` / `{}` | `{}` | {} |",
-      row.workload,
-      row.protocol,
-      row.expected_experiment_backend,
-      row.control_sample_count,
-      row.experiment_sample_count,
-      format_number(row.control_median_rps),
-      format_number(row.experiment_median_rps),
-      format_ratio_value(row.experiment_rps_ratio_vs_control),
-      format_number(row.control_median_cpu_time_per_request_ns),
-      format_number(row.experiment_median_cpu_time_per_request_ns),
-      format_ratio_value(row.experiment_cpu_time_per_request_ratio_vs_control),
-      format_number(row.control_median_p99_ms),
-      format_number(row.experiment_median_p99_ms),
-      format_ratio_value(row.experiment_p99_ratio_vs_control),
-      row.experiment_compio_selected,
-      row.experiment_compio_fallback,
-      row.experiment_compio_error,
-      row.experiment_compio_connection_reused,
-      row.experiment_tokio_hyper_selected,
-      row.control_tokio_hyper_pool_hit,
-      row.experiment_tokio_hyper_pool_hit,
-      row.status,
-      markdown_escape_cell(&row.reason)
     )
     .unwrap();
   }
@@ -10019,7 +9622,6 @@ mod tests {
         direct_h1_pool: None,
         direct_h2_pool: None,
         direct_h1_io_backend: None,
-        compio_direct_h1_connection_events: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -10037,7 +9639,6 @@ mod tests {
         direct_h1_pool: None,
         direct_h2_pool: None,
         direct_h1_io_backend: None,
-        compio_direct_h1_connection_events: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -10055,7 +9656,6 @@ mod tests {
         direct_h1_pool: None,
         direct_h2_pool: None,
         direct_h1_io_backend: None,
-        compio_direct_h1_connection_events: None,
         static_responses: None,
         stage_timing: None,
       })
@@ -10336,9 +9936,6 @@ mod tests {
                     "h2": {
                       "tokio_hyper": {
                         "selected": 96
-                      },
-                      "compio": {
-                        "fallback": 96
                       }
                     }
                   }
@@ -10409,7 +10006,6 @@ mod tests {
       .expect("direct-H1 I/O backend diagnostics should aggregate");
     assert_eq!(io_backend.sample_count, 1);
     assert_eq!(io_backend.values["h2"]["tokio_hyper"]["selected"], 96);
-    assert_eq!(io_backend.values["h2"]["compio"]["fallback"], 96);
   }
 
   #[test]
@@ -11060,7 +10656,6 @@ mod tests {
       direct_h1_pool: None,
       direct_h2_pool: None,
       direct_h1_io_backend: None,
-      compio_direct_h1_connection_events: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -11129,7 +10724,6 @@ mod tests {
       direct_h1_pool: None,
       direct_h2_pool: None,
       direct_h1_io_backend: None,
-      compio_direct_h1_connection_events: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -11197,7 +10791,6 @@ mod tests {
       direct_h1_pool: None,
       direct_h2_pool: None,
       direct_h1_io_backend: None,
-      compio_direct_h1_connection_events: None,
       static_responses: None,
       stage_timing: None,
     });
@@ -11274,7 +10867,6 @@ mod tests {
       direct_h1_pool: None,
       direct_h2_pool: None,
       direct_h1_io_backend: None,
-      compio_direct_h1_connection_events: None,
       static_responses: None,
       stage_timing: None,
     });

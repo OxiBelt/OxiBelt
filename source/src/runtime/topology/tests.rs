@@ -1,72 +1,52 @@
 use super::*;
 
-#[test]
-fn legacy_compio_resolves_to_observable_hybrid_topology() {
-  let request = RuntimeTopologyRequest {
-    requested_preset: RuntimeRequestedPreset::Compio,
-    policy: RuntimeTopologyPolicy::AllowFallback,
-    direct_h1: RuntimeDirectH1Requested::Compio,
+fn request() -> RuntimeTopologyRequest {
+  RuntimeTopologyRequest {
+    requested_preset: RuntimeRequestedPreset::TokioHyper,
+    policy: RuntimeTopologyPolicy::RequireExact,
+    direct_h1: RuntimeDirectH1Requested::TokioHyper,
     http3_enabled: true,
     workers: RuntimeWorkerAllocations {
       tokio_executor_workers: 4,
       tcp_accept_workers: 2,
       quic_socket_workers: 2,
-      compio_direct_h1_workers: 3,
       tokio_blocking_worker_limit: None,
     },
-  };
-  let capabilities = RuntimeTopologyCapabilities::available(
-    RuntimeTargetOs::Linux,
-    RuntimeTargetArch::X86_64,
-    Some(CompioDriverSelection::IoUring),
-  );
-  let topology = resolve_runtime_topology(request, capabilities)
-    .expect("supported Compio topology should resolve");
-
-  assert_eq!(
-    topology.resolved_preset,
-    RuntimeResolvedPreset::HybridCompio
-  );
-  assert_eq!(topology.reason, RuntimeTopologyReason::LegacyAlias);
-  assert_eq!(
-    topology.subsystems.general_http,
-    RuntimeSubsystemOwner::Tokio
-  );
-  assert_eq!(
-    topology.subsystems.startup_orchestration,
-    RuntimeSubsystemOwner::Compio
-  );
-  assert_eq!(
-    topology.subsystems.direct_h1_transport,
-    RuntimeSubsystemOwner::Compio
-  );
-  assert_eq!(
-    topology.compatibility_boundaries.compatibility_island_count,
-    1
-  );
-  assert_eq!(
-    topology.legacy_backend_snapshot().active_runtime,
-    "hybrid_compio"
-  );
-  let mut metrics = String::new();
-  topology.append_prometheus(&mut metrics);
-  assert!(metrics.contains(
-    "requested_preset=\"compio\",resolved_preset=\"hybrid_compio\",outcome=\"exact\",reason=\"legacy_alias\""
-  ));
-  assert!(metrics.contains("pool=\"tokio_executor\",owner=\"tokio\",applicability=\"applied\""));
+  }
+}
+fn capabilities() -> RuntimeTopologyCapabilities {
+  RuntimeTopologyCapabilities::available(RuntimeTargetOs::Linux, RuntimeTargetArch::X86_64)
 }
 
 #[test]
-fn external_topology_marks_executor_settings_inapplicable() {
-  let topology = RuntimeTopologySnapshot::external_with_workers(RuntimeWorkerAllocations {
-    tokio_executor_workers: 0,
-    tcp_accept_workers: 3,
-    quic_socket_workers: 2,
-    compio_direct_h1_workers: 0,
-    tokio_blocking_worker_limit: None,
-  });
+fn owned_topology_reports_tokio_ownership_without_compatibility_boundaries() {
+  let topology = resolve_runtime_topology(request(), capabilities()).expect("Tokio topology");
+  assert_eq!(topology.schema_version, 3);
+  assert_eq!(topology.outcome, RuntimeTopologyOutcome::Exact);
+  for (_, owner) in topology.subsystems.assignments() {
+    assert_eq!(owner, RuntimeSubsystemOwner::Tokio);
+  }
+  assert_eq!(
+    topology.blocking.strategy,
+    RuntimeBlockingStrategy::TokioManagedPool
+  );
+  assert_eq!(
+    topology.legacy_backend_snapshot().active_runtime,
+    "tokio_hyper"
+  );
+  let value = serde_json::to_string(&topology).expect("serializable topology");
+  assert!(!value.contains("compio"));
+  assert!(!value.contains("compatibility"));
+  let mut metrics = String::new();
+  topology.append_prometheus(&mut metrics);
+  assert!(metrics.contains("pool=\"tokio_executor\",owner=\"tokio\",applicability=\"applied\"} 4"));
+  assert!(!metrics.contains("compio"));
+  assert!(!metrics.contains("compatibility_boundary"));
+}
 
-  assert_eq!(topology.schema_version, 2);
+#[test]
+fn external_topology_marks_only_caller_owned_executor_settings_inapplicable() {
+  let topology = RuntimeTopologySnapshot::external_with_workers(request().workers);
   assert_eq!(
     topology.worker_applicability.tokio_executor_workers,
     RuntimeWorkerApplicability::Inapplicable
@@ -75,104 +55,78 @@ fn external_topology_marks_executor_settings_inapplicable() {
     topology.worker_applicability.tcp_accept_workers,
     RuntimeWorkerApplicability::Applied
   );
-  assert_eq!(topology.workers.tcp_accept_workers, 3);
-  assert_eq!(topology.workers.quic_socket_workers, 2);
-
-  let mut metrics = String::new();
-  topology.append_prometheus(&mut metrics);
-  assert!(
-    metrics.contains("pool=\"tokio_executor\",owner=\"external\",applicability=\"inapplicable\"")
+  assert_eq!(
+    topology.subsystems.general_http,
+    RuntimeSubsystemOwner::External
   );
-  assert!(metrics.contains("pool=\"tcp_accept\",owner=\"external\",applicability=\"applied\"} 3"));
+  assert_eq!(
+    topology.blocking.strategy,
+    RuntimeBlockingStrategy::External
+  );
 }
 
-fn auto_request(policy: RuntimeTopologyPolicy) -> RuntimeTopologyRequest {
-  RuntimeTopologyRequest {
-    requested_preset: RuntimeRequestedPreset::Auto,
-    policy,
-    direct_h1: RuntimeDirectH1Requested::Auto,
-    http3_enabled: false,
-    workers: RuntimeWorkerAllocations {
-      tokio_executor_workers: 4,
-      tcp_accept_workers: 2,
-      quic_socket_workers: 2,
-      compio_direct_h1_workers: 3,
-      tokio_blocking_worker_limit: None,
-    },
+#[test]
+fn invalid_worker_allocations_are_rejected_before_activation() {
+  for pool in 0..3 {
+    let mut request = request();
+    match pool {
+      0 => request.workers.tokio_executor_workers = 0,
+      1 => request.workers.tcp_accept_workers = 0,
+      _ => request.workers.quic_socket_workers = 0,
+    }
+    assert_eq!(
+      resolve_runtime_topology(request, capabilities())
+        .unwrap_err()
+        .reason,
+      RuntimeTopologyReason::WorkerAllocationInvalid
+    );
   }
 }
 
 #[test]
-fn auto_allow_fallback_records_compio_capability_failure() {
-  let mut capabilities =
-    RuntimeTopologyCapabilities::available(RuntimeTargetOs::Linux, RuntimeTargetArch::X86_64, None);
-  capabilities.compio_main =
-    RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioProbeFailed);
-
-  let topology = resolve_runtime_topology(
-    auto_request(RuntimeTopologyPolicy::AllowFallback),
-    capabilities,
-  )
-  .expect("allow_fallback should retain a safe Tokio topology");
-
-  assert_eq!(topology.resolved_preset, RuntimeResolvedPreset::TokioHyper);
-  assert_eq!(topology.outcome, RuntimeTopologyOutcome::Fallback);
-  assert_eq!(topology.reason, RuntimeTopologyReason::CompioProbeFailed);
-  assert_eq!(topology.workers.compio_direct_h1_workers, 0);
+fn required_capability_failures_are_never_downgraded_to_fallback() {
+  for index in 0..4 {
+    let mut capabilities = capabilities();
+    let reason = match index {
+      0 => {
+        capabilities.platform =
+          RuntimeCapability::Unavailable(RuntimeTopologyReason::UnsupportedOperatingSystem);
+        RuntimeTopologyReason::UnsupportedOperatingSystem
+      }
+      1 => {
+        capabilities.required_socket_features =
+          RuntimeCapability::Unavailable(RuntimeTopologyReason::RequiredSocketFeatureUnavailable);
+        RuntimeTopologyReason::RequiredSocketFeatureUnavailable
+      }
+      2 => {
+        capabilities.selected_protocol_features =
+          RuntimeCapability::Unavailable(RuntimeTopologyReason::SelectedProtocolFeatureUnavailable);
+        RuntimeTopologyReason::SelectedProtocolFeatureUnavailable
+      }
+      _ => {
+        capabilities.hardening =
+          RuntimeCapability::Unavailable(RuntimeTopologyReason::HardeningIncompatible);
+        RuntimeTopologyReason::HardeningIncompatible
+      }
+    };
+    assert_eq!(
+      resolve_runtime_topology(request(), capabilities)
+        .unwrap_err()
+        .reason,
+      reason
+    );
+  }
 }
 
 #[test]
-fn auto_require_exact_rejects_compio_capability_failure() {
-  let mut capabilities =
-    RuntimeTopologyCapabilities::available(RuntimeTargetOs::Linux, RuntimeTargetArch::X86_64, None);
-  capabilities.compio_main =
-    RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioProbeFailed);
-
-  let rejection = resolve_runtime_topology(
-    auto_request(RuntimeTopologyPolicy::RequireExact),
-    capabilities,
-  )
-  .expect_err("require_exact must reject the fallback");
-
-  assert_eq!(rejection.outcome, RuntimeTopologyOutcome::Rejected);
-  assert_eq!(rejection.reason, RuntimeTopologyReason::CompioProbeFailed);
-}
-
-#[test]
-fn invalid_owned_worker_allocation_is_rejected_before_activation() {
-  let mut request = auto_request(RuntimeTopologyPolicy::AllowFallback);
-  request.direct_h1 = RuntimeDirectH1Requested::Compio;
-  request.workers.compio_direct_h1_workers = 0;
-  let capabilities = RuntimeTopologyCapabilities::available(
-    RuntimeTargetOs::Linux,
-    RuntimeTargetArch::X86_64,
-    Some(CompioDriverSelection::IoUring),
-  );
-
-  let rejection = resolve_runtime_topology(request, capabilities)
-    .expect_err("an active Compio direct-H1 fleet requires an owned worker");
-
+fn disabled_http3_owns_no_quic_workers() {
+  let mut request = request();
+  request.http3_enabled = false;
+  request.workers.quic_socket_workers = 0;
+  let topology = resolve_runtime_topology(request, capabilities()).expect("disabled HTTP/3");
   assert_eq!(
-    rejection.reason,
-    RuntimeTopologyReason::WorkerAllocationInvalid
+    topology.subsystems.http3_quic,
+    RuntimeSubsystemOwner::Disabled
   );
-}
-
-#[test]
-fn unsupported_platform_rejection_uses_fixed_capability_reason() {
-  let mut capabilities =
-    RuntimeTopologyCapabilities::available(RuntimeTargetOs::Other, RuntimeTargetArch::X86_64, None);
-  capabilities.platform =
-    RuntimeCapability::Unavailable(RuntimeTopologyReason::UnsupportedOperatingSystem);
-
-  let rejection = resolve_runtime_topology(
-    auto_request(RuntimeTopologyPolicy::RequireExact),
-    capabilities,
-  )
-  .expect_err("an unsupported platform cannot satisfy exact topology");
-
-  assert_eq!(
-    rejection.reason,
-    RuntimeTopologyReason::UnsupportedOperatingSystem
-  );
+  assert_eq!(topology.workers.quic_socket_workers, 0);
 }

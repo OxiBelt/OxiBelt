@@ -282,7 +282,7 @@ encryption, backup, tenancy, and access-mode guarantees remain operator owned.
 
 `RuntimeDefault` is the portable seccomp baseline. Clusters that install the
 repository profiles from `deploy/seccomp/` may instead select a `Localhost`
-profile appropriate to the configured Tokio or Compio runtime. Test that
+Tokio profile appropriate to the executable role. Test that
 profile against the exact image and enabled protocols before enforcing it.
 AppArmor and SELinux policy names, loading, and labels are distribution and
 cluster specific; the chart does not invent or install a generic profile.

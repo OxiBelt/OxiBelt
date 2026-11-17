@@ -25,10 +25,10 @@ use oxibelt::config::{
   LoadBalancingAlgorithm, MetricsDetail, MitigationFailurePolicy, OcspMode, OutboundOcspMode,
   PriorityClass, PriorityMode, PriorityRejectionPolicy, ProxyProtocolEgressMode,
   ProxyProtocolTlsSource, ProxyProtocolVersion, QuicZeroRttMode, RateLimitIdentityPart,
-  RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeMainRuntimeMode, RuntimeOverrides,
-  SharedStateBackendKind, SniForwardClientHelloParseMethod, SniForwardProtocol,
-  StaticFilesSendfileMode, StaticPrecompressedEncoding, StatusHeaderUpstream, StreamNetwork,
-  Tls12CipherSuite, Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
+  RateLimitKey, RetryCondition, RuntimeArtifact, RuntimeOverrides, SharedStateBackendKind,
+  SniForwardClientHelloParseMethod, SniForwardProtocol, StaticFilesSendfileMode,
+  StaticPrecompressedEncoding, StatusHeaderUpstream, StreamNetwork, Tls12CipherSuite,
+  Tls13CipherSuite, TlsCryptoProvider, TlsEarlyDataMode, TlsKeyExchangeGroup,
   TlsServerResumptionMode, TlsVersion, TrailerMode, UdpFlowState, UpstreamDiscoveryProvider,
   UpstreamEchMode, UpstreamTls12ResumptionMode, UpstreamTlsResumptionMode,
   resolve_auto_worker_count,
@@ -3158,37 +3158,51 @@ fn accept_scaling_defaults_are_auto_workers() {
 }
 
 #[test]
-fn runtime_main_runtime_mode_parses_and_defaults_to_hybrid_compio() {
-  let temp_dir = common::TempDir::new("runtime-main-runtime");
-  let (cert_path, key_path) =
-    common::create_self_signed_cert(temp_dir.path(), "runtime-main-runtime");
-  let default_raw = common::minimal_config_toml(&cert_path, &key_path);
-  let auto_raw = default_raw.replace(
-    "worker_threads = \"auto\"",
-    "worker_threads = 2\nmain_runtime = \"auto\"",
-  );
-  let tokio_raw = default_raw.replace(
-    "worker_threads = \"auto\"",
-    "worker_threads = 2\nmain_runtime = \"tokio_hyper\"",
-  );
+fn direct_config_deserialization_rejects_removed_runtime_fields_when_permissive() {
+  let temp_dir = common::TempDir::new("removed-runtime-config");
+  let (cert_path, key_path) = common::create_self_signed_cert(temp_dir.path(), "removed-runtime");
+  let base = common::minimal_config_toml(&cert_path, &key_path);
+  let cases = [
+    (
+      "runtime.main_runtime",
+      toml::Value::String("tokio_hyper".into()),
+    ),
+    ("runtime.direct_h1_io", toml::Value::String("auto".into())),
+    (
+      "runtime.topology_policy",
+      toml::Value::String("require_exact".into()),
+    ),
+    ("runtime.workers.compio_direct_h1", toml::Value::Integer(2)),
+    (
+      "runtime.worker_multipliers.compio_direct_h1",
+      toml::Value::Float(0.5),
+    ),
+  ];
 
-  let default_config: Config = toml::from_str(&default_raw).expect("default config should parse");
-  let auto_config: Config = toml::from_str(&auto_raw).expect("auto runtime config should parse");
-  let tokio_config: Config =
-    toml::from_str(&tokio_raw).expect("tokio_hyper runtime config should parse");
-
-  assert_eq!(
-    default_config.runtime.main_runtime,
-    RuntimeMainRuntimeMode::HybridCompio
-  );
-  assert_eq!(
-    auto_config.runtime.main_runtime,
-    RuntimeMainRuntimeMode::Auto
-  );
-  assert_eq!(
-    tokio_config.runtime.main_runtime,
-    RuntimeMainRuntimeMode::TokioHyper
-  );
+  for (path, value) in cases {
+    let mut document: toml::Value = toml::from_str(&base).expect("base TOML");
+    let root = document.as_table_mut().expect("root table");
+    root
+      .entry("config")
+      .or_insert_with(|| toml::Value::Table(Default::default()))
+      .as_table_mut()
+      .expect("config table")
+      .insert("strict_unknown_fields".into(), toml::Value::Boolean(false));
+    let mut parent = root;
+    let parts = path.split('.').collect::<Vec<_>>();
+    for segment in &parts[..parts.len() - 1] {
+      parent = parent
+        .entry(*segment)
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .expect("nested runtime table");
+    }
+    parent.insert(parts[parts.len() - 1].into(), value);
+    let error = document
+      .try_into::<Config>()
+      .expect_err("removed runtime fields must fail in direct deserialization");
+    assert!(error.to_string().contains(path), "{path}: {error}");
+  }
 }
 
 #[test]

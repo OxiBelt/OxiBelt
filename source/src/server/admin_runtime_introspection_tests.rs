@@ -59,7 +59,7 @@ async fn runtime_introspection_requires_redact_and_dedicated_permission() {
       && response.contains(r#""metadata""#)
       && response.contains(r#""runtime""#)
       && response.contains(r#""connections""#)
-      && response.contains(r#""format_version":3"#)
+      && response.contains(r#""format_version":4"#)
       && response.contains(r#""udp_clients_active":0"#)
       && response.contains(r#""allocations_active":0"#)
       && response.contains(r#""redacted":true"#),

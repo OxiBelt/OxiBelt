@@ -237,14 +237,14 @@ pub fn explain_native_config(path: &Path, field_path: &str) -> anyhow::Result<Co
     runtime_resolution: Some(serde_json::json!({
       "basis": "preflight",
       "activated": false,
-      "requested_preset": config.runtime.main_runtime.as_str(),
-      "canonical_preset": config.runtime.main_runtime.canonical().as_str(),
-      "topology_policy": config.runtime.topology_policy.as_str(),
+      "requested_preset": "tokio_hyper",
+      "canonical_preset": "tokio_hyper",
+      "topology_policy": "require_exact",
+      "direct_h1": "tokio_hyper",
       "workers": {
         "tokio_executor_workers": config.runtime.workers.tokio,
         "tcp_accept_workers": config.runtime.accept.workers,
         "quic_socket_workers": config.quic.socket.workers,
-        "compio_direct_h1_workers": config.runtime.workers.compio_direct_h1,
       },
       "filesystem_access": {
         "schema_version": filesystem_manifest.schema_version(),
@@ -286,6 +286,18 @@ fn load_error_diagnostics(
   document: &NativeConfigDocument,
   error: &str,
 ) -> Vec<ConfigDiagnostic> {
+  if let Some(paths) = error.strip_prefix("configuration contains removed field(s): ") {
+    return paths
+      .split(',')
+      .map(str::trim)
+      .map(|path| removed_field_diagnostic(entry, document, path, true))
+      .collect();
+  }
+  for path in super::shape::removed_runtime_config_fields(&document.value) {
+    if error.starts_with(path) {
+      return vec![removed_field_diagnostic(entry, document, path, false)];
+    }
+  }
   if let Some(paths) = error.strip_prefix("configuration contains unknown field(s): ") {
     return paths
       .split(',')
@@ -316,29 +328,60 @@ fn load_error_diagnostics(
   )]
 }
 
+fn removed_field_diagnostic(
+  entry: &Path,
+  document: &NativeConfigDocument,
+  path: &str,
+  value_valid: bool,
+) -> ConfigDiagnostic {
+  ConfigDiagnostic {
+    code: if value_valid {
+      "CFG_REMOVED_FIELD"
+    } else {
+      "CFG_REMOVED_FIELD_INVALID"
+    }
+    .to_string(),
+    severity: ConfigDiagnosticSeverity::Fatal,
+    stage: ConfigDiagnosticStage::Schema,
+    field_path: path.to_string(),
+    source: source_for_path(entry, &document.origins, path),
+    message: if value_valid {
+      format!("native configuration field `{path}` has been removed")
+    } else {
+      format!("removed native configuration field `{path}` has an invalid legacy value")
+    },
+    suggestions: Vec::new(),
+    replacement: None,
+  }
+}
+
 fn schema_diagnostics(entry: &Path, document: &NativeConfigDocument) -> Vec<ConfigDiagnostic> {
   #[cfg(feature = "config-tooling")]
   {
     let strict = strict_unknown_fields(&document.value);
+    let removed = super::shape::removed_runtime_config_fields(&document.value);
+    let mut diagnostics = Vec::new();
     let mut unknown = Vec::new();
     super::shape::collect_unknown_keys(&document.value, "", &mut unknown);
-    let mut diagnostics = unknown
-      .into_iter()
-      .map(|field_path| ConfigDiagnostic {
-        code: "CFG_UNKNOWN_FIELD".to_string(),
-        severity: if strict {
-          ConfigDiagnosticSeverity::Fatal
-        } else {
-          ConfigDiagnosticSeverity::Warning
-        },
-        stage: ConfigDiagnosticStage::Schema,
-        source: source_for_path(entry, &document.origins, &field_path),
-        message: format!("unknown native configuration field `{field_path}`"),
-        suggestions: suggestions_for(&field_path),
-        replacement: None,
-        field_path,
-      })
-      .collect::<Vec<_>>();
+    diagnostics.extend(
+      unknown
+        .into_iter()
+        .filter(|path| !removed.contains(&path.as_str()))
+        .map(|field_path| ConfigDiagnostic {
+          code: "CFG_UNKNOWN_FIELD".to_string(),
+          severity: if strict {
+            ConfigDiagnosticSeverity::Fatal
+          } else {
+            ConfigDiagnosticSeverity::Warning
+          },
+          stage: ConfigDiagnosticStage::Schema,
+          source: source_for_path(entry, &document.origins, &field_path),
+          message: format!("unknown native configuration field `{field_path}`"),
+          suggestions: suggestions_for(&field_path),
+          replacement: None,
+          field_path,
+        }),
+    );
     diagnostics.extend(
       super::validate_native_schema_instance(&document.value)
         .unwrap_or_default()
@@ -431,37 +474,16 @@ fn append_runtime_compatibility_diagnostics(
     });
   }
 
-  if lookup_toml_value(&document.value, "runtime.main_runtime").and_then(toml::Value::as_str)
-    == Some("compio")
-  {
-    diagnostics.push(ConfigDiagnostic {
-      code: "CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS".to_string(),
-      severity: ConfigDiagnosticSeverity::Warning,
-      stage: ConfigDiagnosticStage::Semantic,
-      field_path: "runtime.main_runtime".to_string(),
-      source: source_for_path(entry, &document.origins, "runtime.main_runtime"),
-      message: "runtime.main_runtime = \"compio\" is a compatibility alias for the hybrid_compio topology preset".to_string(),
-      suggestions: vec!["use runtime.main_runtime = \"hybrid_compio\"".to_string()],
-      replacement: None,
-    });
-  }
-
   for (field_path, message, suggestions) in [
     (
       "runtime.worker_threads",
-      "legacy runtime.worker_threads supplies missing per-owner worker counts; explicit runtime.workers fields override only their owner",
-      vec![
-        "set runtime.workers.tokio explicitly".to_string(),
-        "set runtime.workers.compio_direct_h1 explicitly".to_string(),
-      ],
+      "legacy runtime.worker_threads supplies runtime.workers.tokio when omitted",
+      vec!["set runtime.workers.tokio explicitly".to_string()],
     ),
     (
       "runtime.worker_multipliers.runtime",
-      "legacy runtime.worker_multipliers.runtime supplies missing per-owner multipliers; explicit per-owner multipliers override only their owner",
-      vec![
-        "set runtime.worker_multipliers.tokio explicitly".to_string(),
-        "set runtime.worker_multipliers.compio_direct_h1 explicitly".to_string(),
-      ],
+      "legacy runtime.worker_multipliers.runtime supplies runtime.worker_multipliers.tokio when omitted",
+      vec!["set runtime.worker_multipliers.tokio explicitly".to_string()],
     ),
   ] {
     if lookup_toml_value(&document.value, field_path).is_none() {

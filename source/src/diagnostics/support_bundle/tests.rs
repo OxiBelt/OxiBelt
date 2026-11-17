@@ -47,13 +47,7 @@ async fn runtime_snapshot_redacts_upstream_origin_credentials_and_queries() {
     )),
     "runtime snapshot should include active runtime: {value}"
   );
-  assert!(
-    value.contains(&format!(
-      "\"compatibility_runtime\":\"{}\"",
-      runtime_backend.compatibility_runtime
-    )),
-    "runtime snapshot should include compatibility runtime: {value}"
-  );
+  assert!(!value.contains("compatibility_runtime"));
   assert!(value.contains("\"failure_policy\":\"drop_stale\""));
   assert!(value.contains("\"runtime_topology\""));
   assert!(value.contains("\"resolved_preset\":\"external\""));

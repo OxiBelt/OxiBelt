@@ -229,24 +229,6 @@ fn experimental_feature_table_matches_canonical_lifecycle_matrix() {
 }
 
 #[test]
-fn compio_direct_h1_threat_model_preserves_dispatch_and_reuse_boundaries() {
-  let threat_model = read_repo_file("docs/ThreatModel.md");
-  for expected in [
-    "persistent worker fleet bounds queues, waiters, connections, and retained buffers",
-    "only before an upstream request byte is written",
-    "retires the connection instead of reusing it",
-    "Bodyful and streaming requests stay on Hyper",
-    "no-duplicate-dispatch boundary",
-    "30-minute FD/thread/RSS/active-connection soak",
-  ] {
-    assert!(
-      threat_model.contains(expected),
-      "Compio direct-H1 threat model should preserve {expected:?}"
-    );
-  }
-}
-
-#[test]
 fn embedded_runtime_threat_model_preserves_process_ownership_and_cleanup_boundaries() {
   let threat_model = read_repo_file("docs/ThreatModel.md");
   for expected in [

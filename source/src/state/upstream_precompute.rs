@@ -1,37 +1,11 @@
-//! Runtime-backend and upstream URI values computed while snapshots are built.
+//! Upstream URI values computed while snapshots are built.
 
 use std::collections::HashMap;
 
 use anyhow::Context;
 
 use crate::config::UpstreamConfig;
-#[cfg(test)]
-use crate::config::{Config, RuntimeDirectH1IoMode, RuntimeMainRuntimeMode};
 use crate::proxy::http::uri::UpstreamUriParts;
-#[cfg(test)]
-use crate::runtime::backend::{RuntimeBackendSnapshot, TOKIO_HYPER_RUNTIME_NAME};
-
-#[cfg(test)]
-pub(super) fn effective_direct_h1_io_for_backend(
-  config: &Config,
-  runtime_backend: RuntimeBackendSnapshot,
-) -> RuntimeDirectH1IoMode {
-  if config.runtime.direct_h1_io != RuntimeDirectH1IoMode::Compio {
-    return config.runtime.direct_h1_io;
-  }
-  if config.runtime.main_runtime == RuntimeMainRuntimeMode::TokioHyper
-    || runtime_backend.active_runtime == TOKIO_HYPER_RUNTIME_NAME
-  {
-    tracing::warn!(
-      configured_direct_h1_io = "compio",
-      active_runtime = runtime_backend.active_runtime,
-      "runtime.direct_h1_io = \"compio\" requires an active Compio main runtime; using Tokio/Hyper direct-H1 IO"
-    );
-    return RuntimeDirectH1IoMode::TokioHyper;
-  }
-  RuntimeDirectH1IoMode::Compio
-}
-
 pub(super) fn build_upstream_uri_parts(
   upstreams: &[UpstreamConfig],
 ) -> anyhow::Result<(HashMap<String, UpstreamUriParts>, Vec<UpstreamUriParts>)> {

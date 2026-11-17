@@ -53,6 +53,15 @@ class SeccompProfileContractTest(unittest.TestCase):
         result = self.run_validator()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_compio_runtime_is_not_a_supported_profile(self) -> None:
+        catalog_path = self.seccomp_dir / "profile-catalog-v1.json"
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        catalog["profiles"][0]["runtime"] = "compio"
+        catalog_path.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
+        result = self.run_validator()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has an invalid runtime", result.stderr)
+
     def test_raw_file_digest_mismatch_fails(self) -> None:
         profile_path = self.seccomp_dir / "oxibelt-tokio.json"
         profile_path.write_bytes(profile_path.read_bytes() + b"\n")

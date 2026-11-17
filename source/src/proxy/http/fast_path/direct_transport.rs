@@ -71,7 +71,6 @@ pub(super) async fn attempt_direct_transport(
   let attempt = match transport {
     Some(DirectFastPathTransport::H1) => match try_send_direct_h1(
       &state.direct_h1_pools,
-      state.compio_direct_h1_service.as_ref(),
       &state.metrics,
       upstream_index,
       upstream,
@@ -82,8 +81,6 @@ pub(super) async fn attempt_direct_transport(
       retry_policy_enabled,
       !state.overload.retries_disabled() && state.overload.retry_budget_multiplier() >= 1.0,
       Some(state.overload.clone()),
-      state.effective_direct_h1_io,
-      state.config.proxy.http.early_hints,
       outbound,
       timeouts,
       state.request_path_features.hot_path_metrics,

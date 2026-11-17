@@ -10,81 +10,11 @@ use url::Url;
 
 use super::*;
 
-mod runtime_backend;
+mod hyper_failures;
 mod streaming;
-mod transport_error;
 mod upgrade_guard;
 
 const OLD_DIRECT_H1_SHARD_SCAN_LIMIT: usize = 4;
-
-#[cfg(target_os = "linux")]
-#[test]
-fn compio_predispatch_fallback_policy_fails_closed_for_capacity() {
-  for reason in [
-    CompioDirectH1PredispatchReason::QueueFull,
-    CompioDirectH1PredispatchReason::ConnectionLimit,
-    CompioDirectH1PredispatchReason::Cancelled,
-  ] {
-    assert!(!compio_predispatch_allows_hyper_fallback(reason));
-  }
-  for reason in [
-    CompioDirectH1PredispatchReason::Unhealthy,
-    CompioDirectH1PredispatchReason::Draining,
-    CompioDirectH1PredispatchReason::Resolve,
-    CompioDirectH1PredispatchReason::Connect,
-  ] {
-    assert!(compio_predispatch_allows_hyper_fallback(reason));
-  }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn compio_predispatch_capacity_rejections_use_typed_admission_errors() {
-  let pool = DirectH1Pool::new(&upstream("http://backend.internal:18080"))
-    .expect("plain upstream should create a direct-H1 pool");
-
-  for (reason, expected) in [
-    (
-      CompioDirectH1PredispatchReason::QueueFull,
-      crate::circuit_breakers::AdmissionRejectionReason::QueueFull,
-    ),
-    (
-      CompioDirectH1PredispatchReason::ConnectionLimit,
-      crate::circuit_breakers::AdmissionRejectionReason::ActiveLimit,
-    ),
-  ] {
-    let error = compio_predispatch_rejection_source(&pool, reason, None);
-    let rejection = error
-      .downcast_ref::<crate::circuit_breakers::AdmissionRejection>()
-      .expect("capacity rejection should remain typed");
-    assert_eq!(rejection.reason, expected);
-    assert_eq!(rejection.retry_after, Duration::ZERO);
-  }
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn compio_predispatch_preserves_existing_admission_rejection() {
-  let pool = DirectH1Pool::new(&upstream("http://backend.internal:18080"))
-    .expect("plain upstream should create a direct-H1 pool");
-  let expected = crate::circuit_breakers::AdmissionRejection {
-    reason: crate::circuit_breakers::AdmissionRejectionReason::QueueTimeout,
-    retry_after: Duration::from_secs(7),
-  };
-
-  let error = compio_predispatch_rejection_source(
-    &pool,
-    CompioDirectH1PredispatchReason::ConnectionLimit,
-    Some(anyhow::Error::new(expected)),
-  );
-
-  assert_eq!(
-    error
-      .downcast_ref::<crate::circuit_breakers::AdmissionRejection>()
-      .copied(),
-    Some(expected)
-  );
-}
 
 #[test]
 fn direct_h1_pools_share_process_connection_admission() {
@@ -108,7 +38,7 @@ fn direct_h1_pools_share_process_connection_admission() {
       .circuit_breakers
       .as_ref()
       .is_some_and(|runtime| Arc::ptr_eq(runtime, &circuit_breakers)),
-    "Compio connection ownership must use the process-wide circuit-breaker runtime"
+    "Direct H1 connection ownership must use the process-wide circuit-breaker runtime"
   );
 }
 
@@ -372,19 +302,6 @@ fn prevalidated_prepared_request_preserves_origin_form_and_synthesizes_host() {
       .get::<PrevalidatedDirectH1Request>()
       .is_none()
   );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn compio_worker_sharding_stripes_one_origin_across_the_fleet() {
-  let upstream = upstream("http://backend.internal:18080");
-  let pool = DirectH1Pool::new(&upstream).expect("plain origin should be direct-H1 eligible");
-  let mut shards = (0..4)
-    .map(|_| pool.compio_worker_shard(4))
-    .collect::<Vec<_>>();
-  shards.sort_unstable();
-  shards.dedup();
-  assert_eq!(shards, vec![0, 1, 2, 3]);
 }
 
 #[tokio::test]
@@ -754,15 +671,12 @@ async fn send_and_recycle_direct_get(
   let prepared = PreparedDirectH1Request::from_request(request, &pool.origin)?;
   let mut direct = send_prepared_request(
     pool,
-    None,
     metrics,
     FastPathMetricProtocol::H1,
     prepared,
     timeouts,
-    DirectH1RuntimeBackend::TokioHyper,
     true,
     None,
-    crate::config::EarlyHintsMode::Drop,
     DirectH1SendMetricOptions {
       hot_path_metrics: true,
       diagnostic_metrics: false,

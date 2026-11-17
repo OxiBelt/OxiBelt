@@ -15,10 +15,10 @@ cargo run \
   --locked \
   -- "${generated}"
 
-if ! cmp --silent "${generated}" source/assets/oxibelt-config-v1.schema.json; then
+if ! cmp --silent "${generated}" source/assets/oxibelt-config-v2.schema.json; then
   echo "native configuration schema drifted; regenerate it with:" >&2
-  echo "cargo run -p oxibelt --example generate-native-config-schema --features config-tooling -- source/assets/oxibelt-config-v1.schema.json" >&2
-  diff --unified source/assets/oxibelt-config-v1.schema.json "${generated}" || true
+  echo "cargo run -p oxibelt --example generate-native-config-schema --features config-tooling -- source/assets/oxibelt-config-v2.schema.json" >&2
+  diff --unified source/assets/oxibelt-config-v2.schema.json "${generated}" || true
   exit 1
 fi
 

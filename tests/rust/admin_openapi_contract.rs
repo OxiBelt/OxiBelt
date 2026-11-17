@@ -259,9 +259,9 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let validation = &spec["components"]["schemas"]["ConfigValidationReport"];
   assert_eq!(
     validation["properties"]["report_schema_version"]["const"],
-    3
+    4
   );
-  assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 1);
+  assert_eq!(validation["properties"]["native_schema_epoch"]["const"], 2);
 
   let filesystem_access = &spec["components"]["schemas"]["ConfigExplainReport"]["properties"]["runtime_resolution"]
     ["properties"]["filesystem_access"];
@@ -294,7 +294,7 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
     activation["properties"]["activation_plan_schema_version"]["const"],
     3
   );
-  assert_eq!(activation["properties"]["native_schema_epoch"]["const"], 1);
+  assert_eq!(activation["properties"]["native_schema_epoch"]["const"], 2);
   assert_eq!(activation["properties"]["changes"]["maxItems"], 4096);
   let listener = &spec["components"]["schemas"]["ConfigActivationListenerPlan"];
   assert!(
@@ -391,11 +391,11 @@ fn config_tooling_models_match_the_admin_runtime_contract() {
   let explain_report = &spec["components"]["schemas"]["ConfigExplainReport"];
   assert_eq!(
     explain_report["properties"]["report_schema_version"]["const"],
-    3
+    4
   );
   assert_eq!(
     explain_report["properties"]["native_schema_epoch"]["const"],
-    1
+    2
   );
   assert_eq!(explain_report["properties"]["ok"]["const"], true);
   assert_eq!(
@@ -503,7 +503,7 @@ fn runtime_diagnostics_document_typed_redacted_hardening_evidence() {
   );
   assert_eq!(
     spec["components"]["schemas"]["RuntimeIntrospectionMetadata"]["properties"]["format_version"]["const"],
-    3
+    4
   );
   let turn = &spec["components"]["schemas"]["RuntimeIntrospectionTurnConnections"];
   assert_eq!(turn["properties"]["udp_clients_active"]["minimum"], 0);

@@ -257,9 +257,6 @@ read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
 worker_threads = 1
-main_runtime = "tokio_hyper"
-topology_policy = "allow_fallback"
-direct_h1_io = "tokio_hyper"
 
 [runtime.accept]
 workers = 1

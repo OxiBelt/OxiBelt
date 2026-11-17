@@ -157,10 +157,9 @@ questions.
 | Question | Primary signal | Notes |
 | --- | --- | --- |
 | Is the proxy up? | `/ready`, `/live`, `oxibelt_requests_total`, `oxibelt_responses_total` | Readiness returns `503 draining` while lifecycle drain is active and `503 overloaded` for configured hard overload. Health responses include `X-OxiBelt-Backend-Status`, `X-OxiBelt-Overload-State`, and fixed-vocabulary `X-OxiBelt-Runtime-Status` without exposing request data. |
-| Which runtime topology is active? | `oxibelt_runtime_topology_info`, `oxibelt_runtime_subsystem_owner`, `oxibelt_runtime_worker_allocation`, `oxibelt_runtime_compatibility_boundary`, authenticated runtime introspection | Compare requested and resolved presets, fallback outcome/reason, every subsystem owner, final worker allocations, compatibility islands, and active direct-H1 state. `hybrid_compio` means a Compio bootstrap around Tokio-owned server work, not an all-Compio server. |
+| Which runtime topology is active? | `oxibelt_runtime_topology_info`, `oxibelt_runtime_subsystem_owner`, `oxibelt_runtime_worker_allocation`, authenticated runtime introspection | Verify Tokio/Hyper ownership, applied worker allocations, and caller-owned embedded executor reporting. |
 | Is overload protection active? | `oxibelt_overload_state`, `oxibelt_overload_resource_ratio`, `oxibelt_overload_active_work`, `oxibelt_overload_rejections_total`, `oxibelt_overload_transitions_total`, `oxibelt_overload_control_plane_active` | Alert when `state="hard"` persists, resource ratios approach hard thresholds, or rejections rise. Signal, work-kind, action, boundary, and control-plane labels are fixed vocabularies; no labels contain routes, client identities, URLs, or raw errors. |
 | Are request queues or upstream circuits limiting traffic? | `oxibelt_circuit_breaker_active`, `oxibelt_circuit_breaker_queued`, `oxibelt_circuit_breaker_rejections_total`, `oxibelt_circuit_breaker_state`, `oxibelt_circuit_breaker_transitions_total`, `oxibelt_circuit_breaker_priority_active`, `oxibelt_circuit_breaker_priority_capacity`, `oxibelt_circuit_breaker_priority_queued`, `oxibelt_circuit_breaker_priority_rejections_total`, `oxibelt_circuit_breaker_priority_queue_wait_milliseconds_total` | Alert on sustained queued work, rising `queue_timeout`/`retry_budget` or per-priority `share_limit` rejections, or a route/pool `state="open"`. Scope labels are configuration-derived and capped; priority, capacity, and reason labels use fixed vocabularies only and never include paths, host headers, client identities, origins, or raw errors. |
-| Is the persistent Compio direct-H1 service healthy? | `oxibelt_http_compio_direct_h1_submissions_total`, `oxibelt_http_compio_direct_h1_queue_occupancy`, `oxibelt_http_compio_direct_h1_workers`, `oxibelt_http_compio_direct_h1_connections`, `oxibelt_http_compio_direct_h1_connection_events_total`, `oxibelt_http_compio_direct_h1_dispatch_total`, wait/connect/cancellation duration counters, buffer events, and copied bytes | This Linux-only experimental service is present only when Compio direct-H1 is selected. Alert on nonzero `full`, `unhealthy`, or `draining` submissions; sustained queue occupancy; an unhealthy worker; post-dispatch failures; retirement churn; or active connections that do not return to zero after load. These series use fixed state/outcome/event vocabularies and never label an origin, host, route, path, peer, request, or raw error. |
 | Are certificates healthy? | `GET /admin/v1/tls/downstream`, `GET /admin/v1/tls/upstream`, `oxibelt_tls_ocsp_*`, `oxibelt_tls_crlite_*`, `oxibelt_tls_ct_*`, `oxibelt_tls_upstream_*`, TLS session storage metrics | Certificate inventory, including bounded SNI-selected downstream certificate entries, downstream OCSP/CRLite/CT state, and upstream revocation state stay on the authenticated Admin API. Public TLS health metrics use fixed series only and omit responder URLs, SNI, issuers, certificate fingerprints, serial numbers, SCTs, Log IDs, operators, and filter identifiers. |
 | Are upstreams healthy? | `oxibelt_upstream_requests_total`, `oxibelt_upstream_errors_total`, `oxibelt_upstream_pool_servers`, `oxibelt_upstream_pool_health_reports_total`, `oxibelt_upstream_pool_outlier_ejections_total`, upstream latency histograms | Public pool metrics use pool/source/state/outcome/reason labels and omit origins, discovery endpoints, tokens, raw errors, and response bodies. Use Admin upstream-pool APIs for per-server health reason, slow-start, ejection, active control, and Admin upstream TLS status for outbound revocation health. |
 | Are stream listeners healthy? | `oxibelt_stream_tcp_sessions_total`, `oxibelt_stream_udp_sessions_total`, `oxibelt_stream_session_errors_total`, `oxibelt_stream_tcp_bytes_total`, `oxibelt_stream_udp_bytes_total`, `oxibelt_stream_udp_rate_limited_total`, `oxibelt_stream_udp_flows_active`, `oxibelt_stream_udp_flows_created_total`, `oxibelt_stream_udp_flows_restored_total`, `oxibelt_stream_udp_flow_persistence_errors_total`, `oxibelt_stream_udp_flow_fence_rejections_total`, `oxibelt_stream_udp_flows_expired_total`, `oxibelt_stream_udp_flows_evicted_total`, `oxibelt_stream_udp_flow_admission_rejections_total`, `oxibelt_stream_udp_flows_forced_shutdown_total`, `oxibelt_stream_udp_datagrams_dropped_total`, Admin stream-pool snapshots | Public stream metrics are aggregate and omit listener names, peers, SNI values, targets, origins, and shared-state keys. `udp_flows_active` is current process-local socket/session state, not the global number of durable records. Compare created with restored flows, and alert on persistence errors, fence rejections, admission rejections, or dropped datagrams. Use authenticated stream-pool APIs and runtime introspection for per-pool state. |
@@ -173,7 +172,7 @@ questions.
 
 ### Runtime topology and readiness signals
 
-Startup and successful full-reload events report the version-`2` topology
+Startup and successful full-reload events report the version-`3` topology
 using fixed enum values and counts. The active Admin config explain, runtime
 snapshot, runtime introspection, and redacted support bundle report the same
 active-generation topology. Offline config explain reports
@@ -184,11 +183,10 @@ The public metrics surface exports:
 
 - `oxibelt_runtime_topology_info{requested_preset,resolved_preset,outcome,reason}`;
 - `oxibelt_runtime_subsystem_owner{subsystem,owner}`;
-- `oxibelt_runtime_worker_allocation{pool,owner,applicability}`;
-- `oxibelt_runtime_compatibility_boundary{boundary}`.
+- `oxibelt_runtime_worker_allocation{pool,owner,applicability}`.
 
 These labels come from bounded preset, outcome, reason, subsystem, owner,
-pool, applicability, and boundary vocabularies. Worker `applicability` is
+pool and applicability vocabularies. Worker `applicability` is
 `applied` or `inapplicable`, indicating whether the corresponding worker
 setting controls the reported pool. Worker counts are gauge values, not label
 values. Logs, metrics, and support surfaces omit raw capability errors,
@@ -202,27 +200,14 @@ or another readiness-critical runtime subsystem is unavailable; authenticated
 runtime output carries the fixed subsystem and reason while the public body
 remains generic.
 
-### Persistent Compio direct-H1 metrics
+### Removed runtime metrics
 
-The service exports the following public-safe metric families:
+Compio-specific metric families and `oxibelt_runtime_compatibility_boundary`
+are removed. Remove their alerts and dashboard queries before rollout. There
+are no deprecated zero-valued series. Runtime topology schema `3`, introspection
+format `4`, and support-bundle format `4` report Tokio ownership directly.
 
-- `oxibelt_http_compio_direct_h1_submissions_total{outcome}` with `outcome="immediate|waited|full|unhealthy|draining"`;
-- `oxibelt_http_compio_direct_h1_queue_occupancy`;
-- `oxibelt_http_compio_direct_h1_workers{state}` with `state="starting|healthy|unhealthy|draining|stopped"`;
-- `oxibelt_http_compio_direct_h1_connections{state}` with `state="active|idle"`;
-- `oxibelt_http_compio_direct_h1_connection_events_total{event}` with `event="created|reused|retired_idle_timeout|retired_absolute_lifetime|retired_stale_generation|retired_peer_close|retired_eof|retired_upgrade|retired_protocol|retired_timeout|retired_cancellation|retired_residual_bytes|retired_pool_full|retired_io_error|retired_worker_failure|closed_shutdown"`;
-- `oxibelt_http_compio_direct_h1_dispatch_total{outcome}` with `outcome="predispatch_fallback|predispatch_rejection|postdispatch_failure"`;
-- `oxibelt_http_compio_direct_h1_buffer_events_total{event}` with `event="allocate|reuse|discard"`;
-- `oxibelt_http_compio_direct_h1_operation_wait_observations_total` and `oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total`;
-- `oxibelt_http_compio_direct_h1_connect_observations_total` and `oxibelt_http_compio_direct_h1_connect_duration_ns_total`;
-- `oxibelt_http_compio_direct_h1_cancellation_observations_total` and `oxibelt_http_compio_direct_h1_cancellation_duration_ns_total`;
-- `oxibelt_http_compio_direct_h1_copied_bytes_total` (bytes materialized into
-  the owned upstream request wire buffer; response reads append directly into
-  the owned parser buffer).
-
-Compute mean wait, connect, or cancellation completion time only when its matching observation delta is positive. A `predispatch_fallback` is safe to replay through the established path because no upstream request byte was written. A `predispatch_rejection` means policy suppressed fallback before dispatch, including capacity exhaustion or cancellation. A `postdispatch_failure` is not fallback evidence and must not be retried outside the existing replay-safety policy. Connection `reused` should rise during eligible keep-alive traffic. Any retirement reason means that connection was not returned to the idle pool.
-
-The version-`2` redacted support bundle includes the resolved runtime topology,
+The version-`4` redacted support bundle includes the resolved runtime topology,
 the resolved shared-state feature/backend mapping, and bounded failure-policy
 state (`mode`, backend name, backend kind, degraded flag, and stale-snapshot
 age). It omits connection URLs, credentials, request keys, raw capability

@@ -4,7 +4,6 @@ use ::http::{Response, StatusCode};
 
 use crate::proxy::http::body::ProxyBody;
 use crate::proxy::http::response::text_response;
-use crate::runtime_health::RuntimeSubsystem;
 use crate::state::AppSnapshot;
 
 pub(super) fn health_response(snapshot: &AppSnapshot, path: &str) -> Option<Response<ProxyBody>> {
@@ -96,12 +95,7 @@ fn with_runtime_status_header(
   mut response: Response<ProxyBody>,
   snapshot: &AppSnapshot,
 ) -> Response<ProxyBody> {
-  let acceleration_degraded = snapshot
-    .runtime_health
-    .subsystem_is_unhealthy(RuntimeSubsystem::CompioDirectH1);
-  let value = if acceleration_degraded && snapshot.runtime_topology.direct_h1.active {
-    "required_acceleration_degraded"
-  } else if snapshot.runtime_health.is_ready() {
+  let value = if snapshot.runtime_health.is_ready() {
     "ready"
   } else {
     "runtime_unavailable"

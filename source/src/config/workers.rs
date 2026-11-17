@@ -7,9 +7,8 @@ use anyhow::{Context, bail};
 use serde::Deserialize;
 
 use super::{
-  Config, HotReloadConfig, RuntimeDirectH1IoMode, RuntimeDrainConfig, RuntimeHardeningConfig,
-  RuntimeMainRuntimeMode, RuntimeTopologyPolicy, default_accept_error_backoff_ms,
-  default_runtime_accept_backlog, default_true,
+  Config, HotReloadConfig, RuntimeDrainConfig, RuntimeHardeningConfig,
+  default_accept_error_backoff_ms, default_runtime_accept_backlog, default_true,
 };
 
 pub(super) const NETPORT_SWITCHER_CONFIG_KEYS: &[&str] = &[
@@ -160,8 +159,6 @@ struct RawWorkerMultipliersConfig {
   runtime: Option<f64>,
   #[serde(default)]
   tokio: Option<f64>,
-  #[serde(default)]
-  compio_direct_h1: Option<f64>,
   #[serde(default = "default_accept_worker_multiplier")]
   accept: f64,
   #[serde(default = "default_quic_socket_worker_multiplier")]
@@ -173,7 +170,6 @@ impl Default for RawWorkerMultipliersConfig {
     Self {
       runtime: None,
       tokio: None,
-      compio_direct_h1: None,
       accept: default_accept_worker_multiplier(),
       quic_socket: default_quic_socket_worker_multiplier(),
     }
@@ -188,7 +184,6 @@ impl RawWorkerMultipliersConfig {
     let resolved = WorkerMultipliersConfig {
       runtime,
       tokio: self.tokio.unwrap_or(runtime),
-      compio_direct_h1: self.compio_direct_h1.unwrap_or(runtime),
       accept: self.accept,
       quic_socket: self.quic_socket,
     };
@@ -203,8 +198,6 @@ pub struct WorkerMultipliersConfig {
   pub runtime: f64,
   #[serde(default = "default_runtime_worker_multiplier")]
   pub tokio: f64,
-  #[serde(default = "default_runtime_worker_multiplier")]
-  pub compio_direct_h1: f64,
   #[serde(default = "default_accept_worker_multiplier")]
   pub accept: f64,
   #[serde(default = "default_quic_socket_worker_multiplier")]
@@ -216,7 +209,6 @@ impl Default for WorkerMultipliersConfig {
     Self {
       runtime: default_runtime_worker_multiplier(),
       tokio: default_runtime_worker_multiplier(),
-      compio_direct_h1: default_runtime_worker_multiplier(),
       accept: default_accept_worker_multiplier(),
       quic_socket: default_quic_socket_worker_multiplier(),
     }
@@ -227,10 +219,6 @@ impl WorkerMultipliersConfig {
   fn validate(&self) -> anyhow::Result<()> {
     validate_worker_multiplier("runtime.worker_multipliers.runtime", self.runtime)?;
     validate_worker_multiplier("runtime.worker_multipliers.tokio", self.tokio)?;
-    validate_worker_multiplier(
-      "runtime.worker_multipliers.compio_direct_h1",
-      self.compio_direct_h1,
-    )?;
     validate_worker_multiplier("runtime.worker_multipliers.accept", self.accept)?;
     validate_worker_multiplier("runtime.worker_multipliers.quic_socket", self.quic_socket)
   }
@@ -240,22 +228,16 @@ impl WorkerMultipliersConfig {
 struct RawRuntimeWorkersConfig {
   #[serde(default)]
   tokio: Option<WorkerCountSetting>,
-  #[serde(default)]
-  compio_direct_h1: Option<WorkerCountSetting>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 pub struct RuntimeWorkersConfig {
   pub tokio: usize,
-  pub compio_direct_h1: usize,
 }
 
 impl Default for RuntimeWorkersConfig {
   fn default() -> Self {
-    Self {
-      tokio: 1,
-      compio_direct_h1: 1,
-    }
+    Self { tokio: 1 }
   }
 }
 
@@ -263,9 +245,6 @@ impl RuntimeWorkersConfig {
   fn validate(&self) -> anyhow::Result<()> {
     if self.tokio == 0 {
       bail!("runtime.workers.tokio must be greater than 0");
-    }
-    if self.compio_direct_h1 == 0 {
-      bail!("runtime.workers.compio_direct_h1 must be greater than 0");
     }
     Ok(())
   }
@@ -277,7 +256,6 @@ pub struct WorkerResolutionConfig {
   pub fallback_error: Option<&'static str>,
   pub runtime_multiplier: f64,
   pub tokio_multiplier: f64,
-  pub compio_direct_h1_multiplier: f64,
   pub accept_multiplier: f64,
   pub quic_socket_multiplier: f64,
 }
@@ -289,7 +267,6 @@ impl Default for WorkerResolutionConfig {
       fallback_error: None,
       runtime_multiplier: default_runtime_worker_multiplier(),
       tokio_multiplier: default_runtime_worker_multiplier(),
-      compio_direct_h1_multiplier: default_runtime_worker_multiplier(),
       accept_multiplier: default_accept_worker_multiplier(),
       quic_socket_multiplier: default_quic_socket_worker_multiplier(),
     }
@@ -311,10 +288,6 @@ pub(super) struct RawRuntimeConfig {
   #[serde(default)]
   workers: RawRuntimeWorkersConfig,
   #[serde(default)]
-  main_runtime: RuntimeMainRuntimeMode,
-  #[serde(default)]
-  topology_policy: RuntimeTopologyPolicy,
-  #[serde(default)]
   worker_multipliers: RawWorkerMultipliersConfig,
   #[serde(default)]
   accept: RawRuntimeAcceptConfig,
@@ -322,8 +295,6 @@ pub(super) struct RawRuntimeConfig {
   drain: RuntimeDrainConfig,
   #[serde(default)]
   hot_reload: HotReloadConfig,
-  #[serde(default)]
-  direct_h1_io: RuntimeDirectH1IoMode,
   #[serde(default)]
   hardening: RuntimeHardeningConfig,
   #[serde(default)]
@@ -339,13 +310,10 @@ impl Default for RawRuntimeConfig {
       unprivileged_mode: true,
       worker_threads: None,
       workers: RawRuntimeWorkersConfig::default(),
-      main_runtime: RuntimeMainRuntimeMode::HybridCompio,
-      topology_policy: RuntimeTopologyPolicy::AllowFallback,
       worker_multipliers: RawWorkerMultipliersConfig::default(),
       accept: RawRuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
-      direct_h1_io: RuntimeDirectH1IoMode::Auto,
       hardening: RuntimeHardeningConfig::default(),
       netport_switcher: NetportSwitcherConfig::default(),
     }
@@ -361,13 +329,10 @@ pub struct RuntimeConfig {
   /// Compatibility projection of `workers.tokio` for existing runtime consumers.
   pub worker_threads: usize,
   pub workers: RuntimeWorkersConfig,
-  pub main_runtime: RuntimeMainRuntimeMode,
-  pub topology_policy: RuntimeTopologyPolicy,
   pub worker_multipliers: WorkerMultipliersConfig,
   pub accept: RuntimeAcceptConfig,
   pub drain: RuntimeDrainConfig,
   pub hot_reload: HotReloadConfig,
-  pub direct_h1_io: RuntimeDirectH1IoMode,
   pub hardening: RuntimeHardeningConfig,
   pub netport_switcher: NetportSwitcherConfig,
   #[serde(skip)]
@@ -383,13 +348,10 @@ impl Default for RuntimeConfig {
       unprivileged_mode: true,
       worker_threads: 1,
       workers: RuntimeWorkersConfig::default(),
-      main_runtime: RuntimeMainRuntimeMode::HybridCompio,
-      topology_policy: RuntimeTopologyPolicy::AllowFallback,
       worker_multipliers: WorkerMultipliersConfig::default(),
       accept: RuntimeAcceptConfig::default(),
       drain: RuntimeDrainConfig::default(),
       hot_reload: HotReloadConfig::default(),
-      direct_h1_io: RuntimeDirectH1IoMode::Auto,
       hardening: RuntimeHardeningConfig::default(),
       netport_switcher: NetportSwitcherConfig::default(),
       worker_resolution: WorkerResolutionConfig::default(),
@@ -411,15 +373,6 @@ impl RuntimeConfig {
         multipliers.tokio,
         parallelism.available,
       )?,
-      compio_direct_h1: resolve_worker_count(
-        "runtime.workers.compio_direct_h1",
-        raw
-          .workers
-          .compio_direct_h1
-          .unwrap_or(legacy_worker_setting),
-        multipliers.compio_direct_h1,
-        parallelism.available,
-      )?,
     };
     let accept =
       RuntimeAcceptConfig::resolve(raw.accept, multipliers.accept, parallelism.available)?;
@@ -430,13 +383,10 @@ impl RuntimeConfig {
       unprivileged_mode: raw.unprivileged_mode,
       worker_threads: workers.tokio,
       workers,
-      main_runtime: raw.main_runtime,
-      topology_policy: raw.topology_policy,
       worker_multipliers: multipliers,
       accept,
       drain: raw.drain,
       hot_reload: raw.hot_reload,
-      direct_h1_io: raw.direct_h1_io,
       hardening: raw.hardening,
       netport_switcher: raw.netport_switcher,
       worker_resolution: WorkerResolutionConfig {
@@ -444,7 +394,6 @@ impl RuntimeConfig {
         fallback_error: parallelism.fallback_error,
         runtime_multiplier: multipliers.runtime,
         tokio_multiplier: multipliers.tokio,
-        compio_direct_h1_multiplier: multipliers.compio_direct_h1,
         accept_multiplier: multipliers.accept,
         quic_socket_multiplier: multipliers.quic_socket,
       },

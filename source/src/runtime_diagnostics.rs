@@ -9,14 +9,8 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use oxibelt::config::{Config, HttpListenerMode, RuntimeOverrides};
-use oxibelt::runtime::backend::CompioDriverSelection;
-use oxibelt::runtime::topology::{
-  RuntimeCapability, RuntimeRequestedPreset, RuntimeTopologyPolicy, RuntimeTopologyReason,
-  resolve_runtime_topology,
-};
-use oxibelt::runtime::topology_config::{
-  available_capabilities, capabilities_with_compio_direct_h1_budget, request_from_config,
-};
+use oxibelt::runtime::topology::resolve_runtime_topology;
+use oxibelt::runtime::topology_config::{available_capabilities, request_from_config};
 use serde::Serialize;
 use serde_json::json;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -43,13 +37,6 @@ pub(crate) struct RuntimeProbeCommand {
 
 #[derive(Debug, Subcommand)]
 enum RuntimeProbeSubcommand {
-  #[command(name = "compio-probe")]
-  CompioProbe,
-  #[command(name = "compio-main")]
-  CompioMain {
-    #[arg(long)]
-    worker_threads: usize,
-  },
   #[command(name = "tracing")]
   Tracing {
     #[arg(long, value_name = "FILE")]
@@ -85,7 +72,7 @@ struct RuntimeCheckStage {
 impl RuntimeCheckReport {
   fn new() -> Self {
     Self {
-      schema_version: 1,
+      schema_version: 2,
       ok: true,
       stages: Vec::new(),
       hardening: None,
@@ -121,41 +108,6 @@ impl RuntimeCheckReport {
           required,
           elapsed_ms: started.elapsed().as_millis(),
           message: format!("{error:#}"),
-        });
-        None
-      }
-    }
-  }
-
-  fn capability_stage<T>(
-    &mut self,
-    name: &'static str,
-    required: bool,
-    failure_reason: RuntimeTopologyReason,
-    action: impl FnOnce() -> anyhow::Result<T>,
-  ) -> Option<T> {
-    let started = Instant::now();
-    match action() {
-      Ok(value) => {
-        self.stages.push(RuntimeCheckStage {
-          name,
-          status: "ok",
-          required,
-          elapsed_ms: started.elapsed().as_millis(),
-          message: "ok".to_string(),
-        });
-        Some(value)
-      }
-      Err(_) => {
-        if required {
-          self.ok = false;
-        }
-        self.stages.push(RuntimeCheckStage {
-          name,
-          status: "failed",
-          required,
-          elapsed_ms: started.elapsed().as_millis(),
-          message: failure_reason.as_str().to_string(),
         });
         None
       }
@@ -205,13 +157,7 @@ fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
       report.skip("tracing_init", true, "config did not load");
       report.skip("crypto_provider_init", true, "config did not load");
       report.skip("hardening_application", true, "config did not load");
-      report.skip("compio_probe_runtime_build", true, "config did not load");
-      report.skip("main_compio_runtime_build", true, "config did not load");
-      report.skip(
-        "tokio_compatibility_island_build",
-        true,
-        "config did not load",
-      );
+      report.skip("tokio_main_runtime_build", true, "config did not load");
       report.skip("tls_certificate_key_load", true, "config did not load");
       report.skip("listener_bind_dry_run", true, "config did not load");
       report.skip("runtime_topology_resolution", true, "config did not load");
@@ -247,70 +193,14 @@ fn run_runtime_check(config_path: &Path) -> RuntimeCheckReport {
   }
 
   let topology_request = request_from_config(&config);
-  let compio_requested = topology_request.requested_preset != RuntimeRequestedPreset::TokioHyper;
-  let compio_required = compio_requested
-    && (topology_request.requested_preset != RuntimeRequestedPreset::Auto
-      || topology_request.policy == RuntimeTopologyPolicy::RequireExact);
-  let driver = if compio_requested {
-    report.capability_stage(
-      "compio_probe_runtime_build",
-      compio_required,
-      RuntimeTopologyReason::CompioProbeFailed,
-      run_compio_probe_child,
-    )
-  } else {
-    report.skip(
-      "compio_probe_runtime_build",
-      false,
-      "Compio main topology was not requested",
-    );
-    None
-  };
-  let unsafe_auto_driver = topology_request.requested_preset == RuntimeRequestedPreset::Auto
-    && driver.is_some_and(|driver| !super::compio_driver_safe_for_auto_main_runtime(driver));
-  let compio_main_ok = if driver.is_some() && !unsafe_auto_driver {
-    report
-      .capability_stage(
-        "main_compio_runtime_build",
-        compio_required,
-        RuntimeTopologyReason::CompioRuntimeBuildFailed,
-        || run_compio_main_child(config.runtime.workers.tokio),
-      )
-      .is_some()
-  } else {
-    report.skip(
-      "main_compio_runtime_build",
-      compio_required,
-      if unsafe_auto_driver {
-        RuntimeTopologyReason::UnsafeCompioDriver.as_str()
-      } else if compio_requested {
-        RuntimeTopologyReason::CompioProbeFailed.as_str()
-      } else {
-        "Compio main topology was not requested"
-      },
-    );
-    false
-  };
-  report.stage("tokio_compatibility_island_build", true, || {
-    oxibelt::runtime::tokio_island::TokioIslandRuntime::build(config.runtime.workers.tokio)
+  report.stage("tokio_main_runtime_build", true, || {
+    oxibelt::runtime::main_runtime::MainRuntime::build_tokio(config.runtime.workers.tokio)
       .map(|_| ())
   });
 
   if validation_ok {
-    let mut capabilities = available_capabilities(driver);
-    if compio_requested {
-      capabilities.compio_main = if driver.is_none() {
-        RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioProbeFailed)
-      } else if unsafe_auto_driver {
-        RuntimeCapability::Unavailable(RuntimeTopologyReason::UnsafeCompioDriver)
-      } else if !compio_main_ok {
-        RuntimeCapability::Unavailable(RuntimeTopologyReason::CompioRuntimeBuildFailed)
-      } else {
-        RuntimeCapability::Available
-      };
-    }
+    let capabilities = available_capabilities();
     let started = Instant::now();
-    let capabilities = capabilities_with_compio_direct_h1_budget(&config, capabilities);
     match resolve_runtime_topology(topology_request, capabilities) {
       Ok(topology) => {
         report.stages.push(RuntimeCheckStage {
@@ -394,18 +284,6 @@ fn print_runtime_check_text(report: &RuntimeCheckReport) {
 
 pub(crate) fn handle_runtime_probe_command(command: &RuntimeProbeCommand) -> anyhow::Result<()> {
   match &command.command {
-    RuntimeProbeSubcommand::CompioProbe => {
-      let runtime = oxibelt::runtime::compio::build_driver_runtime()?;
-      let driver = CompioDriverSelection::from(runtime.driver_type());
-      runtime.block_on(async {});
-      println!("driver={}", driver.as_str());
-      Ok(())
-    }
-    RuntimeProbeSubcommand::CompioMain { worker_threads } => {
-      let runtime = oxibelt::runtime::compio::build_runtime(*worker_threads)?;
-      runtime.block_on_tokio_island(async {});
-      Ok(())
-    }
     RuntimeProbeSubcommand::Tracing { config } => {
       let config =
         Config::load(config).with_context(|| format!("failed to load {}", config.display()))?;
@@ -429,22 +307,6 @@ pub(crate) fn handle_runtime_probe_command(command: &RuntimeProbeCommand) -> any
       Ok(())
     }
   }
-}
-
-pub(crate) fn run_compio_probe_child() -> anyhow::Result<CompioDriverSelection> {
-  let stdout = run_probe_child(&["__runtime-probe", "compio-probe"])?;
-  parse_compio_probe_driver(&stdout)
-}
-
-pub(crate) fn run_compio_main_child(worker_threads: usize) -> anyhow::Result<()> {
-  let worker_threads = worker_threads.to_string();
-  run_probe_child(&[
-    "__runtime-probe",
-    "compio-main",
-    "--worker-threads",
-    &worker_threads,
-  ])
-  .map(|_| ())
 }
 
 fn run_hardening_child(
@@ -480,19 +342,6 @@ fn run_probe_child(args: &[&str]) -> anyhow::Result<String> {
     output.status.code(),
     stderr.trim()
   )
-}
-
-fn parse_compio_probe_driver(stdout: &str) -> anyhow::Result<CompioDriverSelection> {
-  let value = stdout
-    .lines()
-    .find_map(|line| line.strip_prefix("driver="))
-    .ok_or_else(|| anyhow::anyhow!("runtime probe did not report Compio driver"))?;
-  match value.trim() {
-    "io_uring" => Ok(CompioDriverSelection::IoUring),
-    "polling" => Ok(CompioDriverSelection::Polling),
-    "iocp" => Ok(CompioDriverSelection::Iocp),
-    other => bail!("runtime probe reported unsupported Compio driver {other}"),
-  }
 }
 
 fn load_tls_material_for_check(config: &Config) -> anyhow::Result<()> {

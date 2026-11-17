@@ -61,11 +61,10 @@ pub(crate) enum RuntimeSubsystem {
   AdminMutation,
   Hardening,
   Waf,
-  CompioDirectH1,
 }
 
 impl RuntimeSubsystem {
-  pub(crate) const ALL: [Self; 17] = [
+  pub(crate) const ALL: [Self; 16] = [
     Self::AppState,
     Self::TaskRegistry,
     Self::ResponseCache,
@@ -82,7 +81,6 @@ impl RuntimeSubsystem {
     Self::AdminMutation,
     Self::Hardening,
     Self::Waf,
-    Self::CompioDirectH1,
   ];
 
   const COUNT: usize = Self::ALL.len();
@@ -105,7 +103,6 @@ impl RuntimeSubsystem {
       Self::AdminMutation => "admin_mutation",
       Self::Hardening => "hardening",
       Self::Waf => "waf",
-      Self::CompioDirectH1 => "compio_direct_h1",
     }
   }
 }
@@ -127,11 +124,10 @@ pub(crate) enum RuntimeTaskKind {
   AdminMutationMember,
   AdminMutationCoordinator,
   AdminAuditAnchor,
-  CompioDirectH1Worker,
 }
 
 impl RuntimeTaskKind {
-  pub(crate) const ALL: [Self; 15] = [
+  pub(crate) const ALL: [Self; 14] = [
     Self::HttpConnection,
     Self::AdminConnection,
     Self::OpsConnection,
@@ -146,7 +142,6 @@ impl RuntimeTaskKind {
     Self::AdminMutationMember,
     Self::AdminMutationCoordinator,
     Self::AdminAuditAnchor,
-    Self::CompioDirectH1Worker,
   ];
 
   const COUNT: usize = Self::ALL.len();
@@ -167,7 +162,6 @@ impl RuntimeTaskKind {
       Self::AdminMutationMember => "admin_mutation_member",
       Self::AdminMutationCoordinator => "admin_mutation_coordinator",
       Self::AdminAuditAnchor => "admin_audit_anchor",
-      Self::CompioDirectH1Worker => "compio_direct_h1_worker",
     }
   }
 }
@@ -399,13 +393,6 @@ impl RuntimeHealth {
       }
     }
     true
-  }
-
-  pub(crate) fn subsystem_is_unhealthy(&self, subsystem: RuntimeSubsystem) -> bool {
-    let active = self.active_generation();
-    let packed = self.subsystem_states[subsystem as usize].load(Ordering::Acquire);
-    record_applies(packed, active)
-      && RuntimeSubsystemState::from_bits(packed) != RuntimeSubsystemState::Healthy
   }
 
   #[cfg(feature = "admin-runtime")]

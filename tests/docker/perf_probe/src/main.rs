@@ -2163,7 +2163,6 @@ fn fast_path_metrics_json(metrics: &str) -> serde_json::Value {
       "io_backend": {
           "direct_h1": direct_h1_io_backend_metrics_json(metrics)
       },
-      "compio_direct_h1": compio_direct_h1_service_metrics_json(metrics),
       "static_responses": static_fast_path_responses_json(metrics),
       "stage_timing": fast_path_stage_timing_json(metrics)
   })
@@ -2339,73 +2338,6 @@ fn direct_h1_io_backend_metrics_json(metrics: &str) -> serde_json::Value {
     backend_object.insert(outcome.clone(), serde_json::json!(current + value));
   }
   serde_json::Value::Object(protocols)
-}
-
-fn compio_direct_h1_service_metrics_json(metrics: &str) -> serde_json::Value {
-  serde_json::json!({
-      "submission_outcomes": prometheus_label_value_map(
-        metrics,
-        "oxibelt_http_compio_direct_h1_submissions_total",
-        "outcome",
-      ),
-      "queue_occupancy": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_queue_occupancy",
-      ),
-      "workers": prometheus_label_value_map(
-        metrics,
-        "oxibelt_http_compio_direct_h1_workers",
-        "state",
-      ),
-      "connections": prometheus_label_value_map(
-        metrics,
-        "oxibelt_http_compio_direct_h1_connections",
-        "state",
-      ),
-      "connection_events": prometheus_label_value_map(
-        metrics,
-        "oxibelt_http_compio_direct_h1_connection_events_total",
-        "event",
-      ),
-      "dispatch_outcomes": prometheus_label_value_map(
-        metrics,
-        "oxibelt_http_compio_direct_h1_dispatch_total",
-        "outcome",
-      ),
-      "buffer_events": prometheus_label_value_map(
-        metrics,
-        "oxibelt_http_compio_direct_h1_buffer_events_total",
-        "event",
-      ),
-      "operation_wait_observations": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_operation_wait_observations_total",
-      ),
-      "operation_wait_duration_ns": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total",
-      ),
-      "connect_observations": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_connect_observations_total",
-      ),
-      "connect_duration_ns": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_connect_duration_ns_total",
-      ),
-      "cancellation_observations": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_cancellation_observations_total",
-      ),
-      "cancellation_duration_ns": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_cancellation_duration_ns_total",
-      ),
-      "copied_bytes": prometheus_u64(
-        metrics,
-        "oxibelt_http_compio_direct_h1_copied_bytes_total",
-      ),
-  })
 }
 
 fn prometheus_label_value_map(metrics: &str, name: &str, label: &str) -> serde_json::Value {
@@ -4142,43 +4074,6 @@ oxibelt_tls_server_session_storage_put_duration_ns_total 23
   }
 
   #[test]
-  fn metrics_parser_extracts_bounded_compio_direct_h1_service_evidence() {
-    let metrics = "\
-oxibelt_http_compio_direct_h1_submissions_total{outcome=\"immediate\"} 19
-oxibelt_http_compio_direct_h1_queue_occupancy 2
-oxibelt_http_compio_direct_h1_workers{state=\"healthy\"} 4
-oxibelt_http_compio_direct_h1_connections{state=\"idle\"} 3
-oxibelt_http_compio_direct_h1_connection_events_total{event=\"created\"} 4
-oxibelt_http_compio_direct_h1_connection_events_total{event=\"reused\"} 15
-oxibelt_http_compio_direct_h1_dispatch_total{outcome=\"predispatch_fallback\"} 2
-oxibelt_http_compio_direct_h1_buffer_events_total{event=\"reuse\"} 11
-oxibelt_http_compio_direct_h1_operation_wait_observations_total 19
-oxibelt_http_compio_direct_h1_operation_wait_duration_ns_total 200
-oxibelt_http_compio_direct_h1_connect_observations_total 4
-oxibelt_http_compio_direct_h1_connect_duration_ns_total 300
-oxibelt_http_compio_direct_h1_cancellation_observations_total 1
-oxibelt_http_compio_direct_h1_cancellation_duration_ns_total 25
-oxibelt_http_compio_direct_h1_copied_bytes_total 4096
-";
-    let parsed = compio_direct_h1_service_metrics_json(metrics);
-    assert_eq!(parsed["submission_outcomes"]["immediate"], 19);
-    assert_eq!(parsed["queue_occupancy"], 2);
-    assert_eq!(parsed["workers"]["healthy"], 4);
-    assert_eq!(parsed["connections"]["idle"], 3);
-    assert_eq!(parsed["connection_events"]["created"], 4);
-    assert_eq!(parsed["connection_events"]["reused"], 15);
-    assert_eq!(parsed["dispatch_outcomes"]["predispatch_fallback"], 2);
-    assert_eq!(parsed["buffer_events"]["reuse"], 11);
-    assert_eq!(parsed["operation_wait_observations"], 19);
-    assert_eq!(parsed["operation_wait_duration_ns"], 200);
-    assert_eq!(parsed["connect_observations"], 4);
-    assert_eq!(parsed["connect_duration_ns"], 300);
-    assert_eq!(parsed["cancellation_observations"], 1);
-    assert_eq!(parsed["cancellation_duration_ns"], 25);
-    assert_eq!(parsed["copied_bytes"], 4096);
-  }
-
-  #[test]
   fn metrics_parser_extracts_fast_path_counters() {
     let metrics = "\
 # TYPE oxibelt_http_fast_path_decisions_total counter
@@ -4214,7 +4109,6 @@ oxibelt_http_direct_h2_pool_events_total{event=\"miss_saturated\"} 5
 # TYPE oxibelt_http_direct_h1_io_backend_total counter
 oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h2\",outcome=\"selected\"} 19
 # TYPE oxibelt_http_direct_h1_io_backend_total counter
-oxibelt_http_direct_h1_io_backend_total{backend=\"compio\",protocol=\"h2\",outcome=\"fallback\"} 19
 # TYPE oxibelt_http_direct_h1_io_backend_total counter
 oxibelt_http_direct_h1_io_backend_total{backend=\"tokio_hyper\",protocol=\"h3\",outcome=\"selected\"} 29
 # TYPE oxibelt_http_static_fast_path_responses_total counter
@@ -4294,10 +4188,6 @@ oxibelt_http_fast_path_stage_duration_ns_total{path=\"static_files\",protocol=\"
     assert_eq!(parsed["pool"]["direct_h2"]["miss_saturated"], 5);
     assert_eq!(
       parsed["io_backend"]["direct_h1"]["h2"]["tokio_hyper"]["selected"],
-      19
-    );
-    assert_eq!(
-      parsed["io_backend"]["direct_h1"]["h2"]["compio"]["fallback"],
       19
     );
     assert_eq!(

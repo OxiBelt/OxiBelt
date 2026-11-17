@@ -7,11 +7,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const PERSON_PROOF_ASSET: &str = "assets/person-proof-challenge.html";
-const NATIVE_CONFIG_SCHEMA_ASSET: &str = "assets/oxibelt-config-v1.schema.json";
+const NATIVE_CONFIG_SCHEMA_V1_ASSET: &str = "assets/oxibelt-config-v1.schema.json";
+const NATIVE_CONFIG_SCHEMA_V2_ASSET: &str = "assets/oxibelt-config-v2.schema.json";
 #[cfg(feature = "admin-runtime")]
 const ADMIN_OPENAPI_ASSET: &str = "assets/admin-openapi.json";
 const PERSON_PROOF_OUTPUT: &str = "person-proof-challenge.html";
-const NATIVE_CONFIG_SCHEMA_OUTPUT: &str = "oxibelt-config-v1.schema.json";
+const NATIVE_CONFIG_SCHEMA_V1_OUTPUT: &str = "oxibelt-config-v1.schema.json";
+const NATIVE_CONFIG_SCHEMA_V2_OUTPUT: &str = "oxibelt-config-v2.schema.json";
 #[cfg(feature = "admin-runtime")]
 const ADMIN_OPENAPI_OUTPUT: &str = "admin-openapi.json";
 
@@ -55,22 +57,35 @@ fn embed_validated_assets() {
   let out_dir =
     PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must provide the build-script OUT_DIR"));
   let person_proof_path = manifest_dir.join(PERSON_PROOF_ASSET);
-  let native_config_schema_path = manifest_dir.join(NATIVE_CONFIG_SCHEMA_ASSET);
+  let native_config_schema_v1_path = manifest_dir.join(NATIVE_CONFIG_SCHEMA_V1_ASSET);
+  let native_config_schema_v2_path = manifest_dir.join(NATIVE_CONFIG_SCHEMA_V2_ASSET);
   #[cfg(feature = "admin-runtime")]
   let admin_openapi_path = manifest_dir.join(ADMIN_OPENAPI_ASSET);
 
   println!("cargo:rerun-if-changed={}", person_proof_path.display());
   println!(
     "cargo:rerun-if-changed={}",
-    native_config_schema_path.display()
+    native_config_schema_v1_path.display()
+  );
+  println!(
+    "cargo:rerun-if-changed={}",
+    native_config_schema_v2_path.display()
   );
   #[cfg(feature = "admin-runtime")]
   println!("cargo:rerun-if-changed={}", admin_openapi_path.display());
 
   let person_proof = read_asset(&person_proof_path, "Person Proof challenge");
   validate_person_proof_asset(&person_proof);
-  let native_config_schema = read_asset(&native_config_schema_path, "native configuration schema");
-  validate_native_config_schema(&native_config_schema);
+  let native_config_schema_v1 = read_asset(
+    &native_config_schema_v1_path,
+    "native configuration schema v1",
+  );
+  validate_native_config_schema(&native_config_schema_v1, 1);
+  let native_config_schema_v2 = read_asset(
+    &native_config_schema_v2_path,
+    "native configuration schema v2",
+  );
+  validate_native_config_schema(&native_config_schema_v2, 2);
   #[cfg(feature = "admin-runtime")]
   let admin_openapi = read_asset(&admin_openapi_path, "Admin OpenAPI document");
   #[cfg(feature = "admin-runtime")]
@@ -78,8 +93,12 @@ fn embed_validated_assets() {
 
   write_embedded_asset(&out_dir.join(PERSON_PROOF_OUTPUT), &person_proof);
   write_embedded_asset(
-    &out_dir.join(NATIVE_CONFIG_SCHEMA_OUTPUT),
-    &native_config_schema,
+    &out_dir.join(NATIVE_CONFIG_SCHEMA_V1_OUTPUT),
+    &native_config_schema_v1,
+  );
+  write_embedded_asset(
+    &out_dir.join(NATIVE_CONFIG_SCHEMA_V2_OUTPUT),
+    &native_config_schema_v2,
   );
   #[cfg(feature = "admin-runtime")]
   write_embedded_asset(&out_dir.join(ADMIN_OPENAPI_OUTPUT), &admin_openapi);
@@ -95,7 +114,7 @@ fn embed_validated_assets() {
   );
 }
 
-fn validate_native_config_schema(bytes: &[u8]) {
+fn validate_native_config_schema(bytes: &[u8], expected_epoch: u64) {
   assert!(
     (1024..=2 * 1024 * 1024).contains(&bytes.len()),
     "native configuration schema must be between 1 KiB and 2 MiB"
@@ -111,7 +130,7 @@ fn validate_native_config_schema(bytes: &[u8]) {
     document
       .get("x-oxibelt-schema-version")
       .and_then(Value::as_u64),
-    Some(1),
+    Some(expected_epoch),
     "native configuration schema version must match the supported epoch"
   );
   assert_eq!(

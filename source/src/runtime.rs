@@ -9,9 +9,7 @@ use crate::config::{Config, LoggingConfig};
 use crate::telemetry::TelemetryRuntime;
 
 pub mod backend;
-pub mod compio;
 pub mod main_runtime;
-pub mod tokio_island;
 pub mod topology;
 pub mod topology_config;
 

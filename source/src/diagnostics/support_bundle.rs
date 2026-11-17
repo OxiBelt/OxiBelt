@@ -27,7 +27,7 @@ use process::process_snapshot;
 pub use shared_state::BackendFailurePolicySnapshot;
 pub use tls::{DownstreamTlsCertificateRuntimeSnapshot, TlsRuntimeSnapshot};
 
-const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 3;
+const SUPPORT_BUNDLE_FORMAT_VERSION: u32 = 4;
 const WAF_RULE_LIMIT: usize = 50;
 
 /// Redacted support bundle assembled from runtime, config, and system snapshots.

@@ -5,6 +5,49 @@ stable [changelog](../CHANGELOG.md) and
 [beta changelog](../CHANGELOG-beta.md) provide the version-specific changes,
 commands, known issues, and rollback constraints that supplement this guide.
 
+## Tokio-only runtime and native configuration epoch 2
+
+OxiBelt now uses Tokio/Hyper exclusively. Compio runtime and direct-H1
+execution, probes, and metrics have been removed. Executables use the system
+allocator on every supported target; the mimalloc Cargo feature is removed.
+Embedding hosts retain allocator ownership.
+
+Native configuration epoch `2` removes `runtime.main_runtime`,
+`runtime.direct_h1_io`, `runtime.topology_policy`, and `compio_direct_h1` under
+`runtime.workers` and `runtime.worker_multipliers`. Removed keys fail validation
+even with permissive unknown-field handling. Tokio, accept, and QUIC worker
+settings and unrelated compatibility aliases retain their behavior.
+
+Keep the original configuration tree for rollback. Review the explicit migration
+before writing its separate output tree:
+
+```sh
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml --from 1 --to 2 --dry-run
+oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml --from 1 --to 2
+oxibeltctl config schema --epoch 2
+```
+
+For epoch-0 input use `--from 0 --to 2`; the CLI composes the legacy transform.
+The old `0 -> 1` destination is retired. Migration validates recognized removed
+values, reports each deletion, preserves includes, and validates the transformed
+overlay before publishing it. The output contains TOML documents only; arrange
+referenced certificates, keys, and rule assets before validating the deployment
+layout with `oxibelt --config PATH --check`. The archived epoch-1 schema remains
+available through `config schema --epoch 1` for historical inspection.
+
+Update monitoring and API clients for runtime topology schema `3`, runtime-check
+schema `2`, config-report schema `4`, runtime-introspection format `4`, and
+support-bundle format `4`. Compio-specific metric families and the runtime
+compatibility-boundary gauge are gone; no placeholder series are emitted.
+The performance aggregate advances to schema `34` and removes Compio experiments.
+
+Deploy the qualified executable or image and migrated configuration together,
+then verify readiness, traffic, reload, and graceful drain. Tokio worker changes
+still require process restart. Roll back by restoring the previous executable
+or image and the original configuration tree together. No persisted-state
+conversion is introduced. Earlier sections record historical release behavior;
+the epoch-2 removal above supersedes their runtime-selection guidance.
+
 ## OxiRule string escapes
 
 OxiRule now rejects unsupported string escapes while loading configuration
@@ -1833,6 +1876,9 @@ on shared gate descriptors. All fifteen Kubernetes/controller/Helm rows remain
 target is bounded to native `linux/amd64` and `linux/arm64`; the other fourteen
 rows retain their existing RISC-V qualification gates and blocker without a new
 RISC-V support claim.
+
+The following paragraphs describe the historical epoch-1 runtime contract.
+For current builds, follow [the epoch-2 migration](#tokio-only-runtime-and-native-configuration-epoch-2).
 
 Post-`0.7.1-beta.2` development keeps `compio-direct-h1-io` experimental.
 The checked-in production example now explicitly recommends

@@ -36,10 +36,6 @@ impl Config {
     if self.proxy.http.direct_h1_small_request_body_max_bytes == 0 {
       bail!("proxy.http.direct_h1_small_request_body_max_bytes must be greater than 0");
     }
-    #[cfg(not(target_os = "linux"))]
-    if self.runtime.direct_h1_io == RuntimeDirectH1IoMode::Compio {
-      bail!("runtime.direct_h1_io = \"compio\" is Linux-only");
-    }
     if self.proxy.http2.max_concurrent_streams == 0
       || self.proxy.http2.max_send_buf_size == 0
       || self.proxy.http2.keep_alive_timeout_ms == 0

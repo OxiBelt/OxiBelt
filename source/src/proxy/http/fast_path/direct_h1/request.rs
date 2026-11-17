@@ -1,6 +1,6 @@
 use anyhow::Context;
 use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
+use http::header::HOST;
 use http::{HeaderMap, HeaderValue, Method, Request, Uri};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Body;
@@ -72,50 +72,6 @@ impl PreparedDirectH1Request {
         uri: self.request.uri().clone(),
         headers: self.request.headers().clone(),
       })
-  }
-
-  pub(super) fn compio_empty_body_wire_eligible(&self) -> bool {
-    self.request.body().is_end_stream()
-      && !self.request.headers().contains_key(TRANSFER_ENCODING)
-      && self
-        .request
-        .headers()
-        .get_all(CONTENT_LENGTH)
-        .iter()
-        .all(|value| value.as_bytes().trim_ascii() == b"0")
-  }
-
-  pub(super) fn request(&self) -> &Request<ProxyBody> {
-    &self.request
-  }
-
-  /// Serialize the already-normalized, bodyless request into an owned worker
-  /// buffer. Callers retain `self` until the first socket write is submitted,
-  /// which keeps pre-dispatch fallback ownership explicit.
-  pub(super) fn serialize_compio_wire(&self, bytes: &mut Vec<u8>) -> anyhow::Result<()> {
-    if !self.compio_empty_body_wire_eligible() {
-      anyhow::bail!("Compio direct-H1 only serializes prevalidated empty request bodies");
-    }
-    bytes.clear();
-    bytes.reserve(512usize.saturating_add(self.request.headers().len().saturating_mul(48)));
-    bytes.extend_from_slice(self.request.method().as_str().as_bytes());
-    bytes.push(b' ');
-    let target = self
-      .request
-      .uri()
-      .path_and_query()
-      .map(|target| target.as_str())
-      .unwrap_or("/");
-    bytes.extend_from_slice(target.as_bytes());
-    bytes.extend_from_slice(b" HTTP/1.1\r\n");
-    for (name, value) in self.request.headers() {
-      bytes.extend_from_slice(name.as_str().as_bytes());
-      bytes.extend_from_slice(b": ");
-      bytes.extend_from_slice(value.as_bytes());
-      bytes.extend_from_slice(b"\r\n");
-    }
-    bytes.extend_from_slice(b"\r\n");
-    Ok(())
   }
 
   pub(super) fn into_request(self) -> Request<ProxyBody> {

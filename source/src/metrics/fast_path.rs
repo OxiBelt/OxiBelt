@@ -3,8 +3,7 @@
 use std::fmt::Write as _;
 
 use self::labels::{
-  DirectH1PoolEvent, DirectH1ResponseProtocolFailure, DirectH2PoolEvent, FastPathMetricProtocol,
-  FastPathTransportMissReason,
+  DirectH1PoolEvent, DirectH2PoolEvent, FastPathMetricProtocol, FastPathTransportMissReason,
 };
 use super::StripedCounter;
 
@@ -72,8 +71,6 @@ const DIRECT_H1_POOL_EVENTS: [&str; 9] = [
   "drop_full",
   "drop_locked",
 ];
-const DIRECT_H1_RESPONSE_PROTOCOL_COUNTER_COUNT: usize =
-  FastPathMetricProtocol::COUNT * DirectH1ResponseProtocolFailure::COUNT;
 #[derive(Debug)]
 pub(super) struct FastPathMetrics {
   decision_counters: [StripedCounter; DECISION_COUNTER_COUNT],
@@ -81,7 +78,6 @@ pub(super) struct FastPathMetrics {
   request_body_counters: [StripedCounter; REQUEST_BODY_COUNTER_COUNT],
   transport_counters: [StripedCounter; TRANSPORT_COUNTER_COUNT],
   direct_h1_pool_counters: [StripedCounter; DIRECT_H1_POOL_EVENTS.len()],
-  direct_h1_response_protocol_counters: Box<[StripedCounter]>,
   direct_h2_pool_counters: [StripedCounter; DirectH2PoolEvent::COUNT],
   direct_h1_io_backend_counters: [StripedCounter; direct_h1_io::COUNTER_COUNT],
   static_fast_path_counters: [StripedCounter; static_response::COUNTER_COUNT],
@@ -97,9 +93,6 @@ impl Default for FastPathMetrics {
       request_body_counters: std::array::from_fn(|_| StripedCounter::default()),
       transport_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
-      direct_h1_response_protocol_counters: (0..DIRECT_H1_RESPONSE_PROTOCOL_COUNTER_COUNT)
-        .map(|_| StripedCounter::default())
-        .collect(),
       direct_h2_pool_counters: std::array::from_fn(|_| StripedCounter::default()),
       direct_h1_io_backend_counters: std::array::from_fn(|_| StripedCounter::default()),
       static_fast_path_counters: std::array::from_fn(|_| StripedCounter::default()),
@@ -309,18 +302,6 @@ impl FastPathMetrics {
         .load(),
       );
     }
-    for protocol in FastPathMetricProtocol::ALL {
-      for reason in DirectH1ResponseProtocolFailure::ALL {
-        append_direct_h1_response_protocol_counter(
-          output,
-          protocol.as_str(),
-          reason.as_str(),
-          self.direct_h1_response_protocol_counters
-            [direct_h1_response_protocol_counter_index(protocol, reason)]
-          .load(),
-        );
-      }
-    }
     for event in DirectH2PoolEvent::ALL {
       append_direct_h2_pool_counter(
         output,
@@ -370,13 +351,6 @@ fn request_body_counter_index(protocol: &str, outcome: &str) -> Option<usize> {
     .iter()
     .position(|candidate| *candidate == outcome)?;
   Some(protocol_index * REQUEST_BODY_OUTCOMES.len() + outcome_index)
-}
-
-const fn direct_h1_response_protocol_counter_index(
-  protocol: FastPathMetricProtocol,
-  reason: DirectH1ResponseProtocolFailure,
-) -> usize {
-  protocol as usize * DirectH1ResponseProtocolFailure::COUNT + reason as usize
 }
 
 fn transport_counter_index(
@@ -510,22 +484,6 @@ fn append_direct_h1_pool_counter(output: &mut String, event: &str, value: u64) {
   output.push_str("# TYPE oxibelt_http_direct_h1_pool_events_total counter\n");
   output.push_str("oxibelt_http_direct_h1_pool_events_total{event=\"");
   output.push_str(event);
-  output.push_str("\"} ");
-  append_u64(output, value);
-  output.push('\n');
-}
-
-fn append_direct_h1_response_protocol_counter(
-  output: &mut String,
-  protocol: &str,
-  reason: &str,
-  value: u64,
-) {
-  output.push_str("# TYPE oxibelt_http_direct_h1_response_protocol_failures_total counter\n");
-  output.push_str("oxibelt_http_direct_h1_response_protocol_failures_total{protocol=\"");
-  output.push_str(protocol);
-  output.push_str("\",reason=\"");
-  output.push_str(reason);
   output.push_str("\"} ");
   append_u64(output, value);
   output.push('\n');

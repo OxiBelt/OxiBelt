@@ -400,7 +400,7 @@ mod tests {
         "conditional": false
       }],
       "activation_plan_schema_version": 1,
-      "native_schema_epoch": 1,
+      "native_schema_epoch": 2,
       "basis": "online_active",
       "ok": true,
       "activation_plan": {
@@ -416,7 +416,7 @@ mod tests {
       render_text_report(&value),
       "Configuration activation plan\n\
 schema version: 1\n\
-native schema epoch: 1\n\
+native schema epoch: 2\n\
 basis: online_active\n\
 valid: true\n\
 minimum required operation: oxi_rule_reload\n\
@@ -450,7 +450,7 @@ prerequisites: 0\n"
         "changes": [],
         "activation_plan": {
           "activation_plan_schema_version": 1,
-          "native_schema_epoch": 1,
+          "native_schema_epoch": 2,
           "ok": false,
           "basis": "online_active",
           "changes": [],

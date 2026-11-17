@@ -10,24 +10,17 @@ fn normalizes_concrete_array_indexes() {
 
 #[test]
 fn rejects_unknown_schema_epoch() {
-  assert!(native_config_schema(2).is_err());
+  assert!(native_config_schema(3).is_err());
 }
 
 #[test]
 fn keeps_native_epoch_and_advances_report_contract() {
-  assert_eq!(NATIVE_CONFIG_SCHEMA_EPOCH, 1);
-  assert_eq!(NATIVE_CONFIG_REPORT_SCHEMA_VERSION, 3);
+  assert_eq!(NATIVE_CONFIG_SCHEMA_EPOCH, 2);
+  assert_eq!(NATIVE_CONFIG_REPORT_SCHEMA_VERSION, 4);
 }
 
 #[test]
-fn assigns_runtime_topology_activation_by_owner() {
-  for path in ["runtime.main_runtime", "runtime.topology_policy"] {
-    assert_eq!(
-      native_config_field_metadata(path).config_activation,
-      NativeConfigActivation::Conditional,
-      "{path}"
-    );
-  }
+fn assigns_tokio_worker_activation() {
   for path in [
     "runtime.worker_threads",
     "runtime.workers.tokio",
@@ -37,16 +30,6 @@ fn assigns_runtime_topology_activation_by_owner() {
     assert_eq!(
       native_config_field_metadata(path).config_activation,
       NativeConfigActivation::RestartRequired,
-      "{path}"
-    );
-  }
-  for path in [
-    "runtime.workers.compio_direct_h1",
-    "runtime.worker_multipliers.compio_direct_h1",
-  ] {
-    assert_eq!(
-      native_config_field_metadata(path).config_activation,
-      NativeConfigActivation::FullReload,
       "{path}"
     );
   }
@@ -131,23 +114,6 @@ fn upstream_client_identity_paths_are_cert_relative() {
   ] {
     assert_eq!(path_kind(path), Some("cert_relative"), "{path}");
   }
-}
-
-#[cfg(feature = "config-tooling")]
-#[test]
-fn declares_canonical_and_compatibility_runtime_values() {
-  assert_eq!(
-    enum_values("runtime.main_runtime"),
-    Some(vec!["hybrid_compio", "tokio_hyper", "auto", "compio"])
-  );
-  assert_eq!(
-    enum_values("runtime.topology_policy"),
-    Some(vec!["allow_fallback", "require_exact"])
-  );
-  assert_eq!(
-    default_value("runtime.main_runtime"),
-    Some(json!("hybrid_compio"))
-  );
 }
 
 #[cfg(feature = "config-tooling")]

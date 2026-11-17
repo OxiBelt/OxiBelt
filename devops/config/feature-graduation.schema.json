@@ -56,7 +56,7 @@
     },
     "features": {
       "type": "array",
-      "minItems": 10,
+      "minItems": 9,
       "uniqueItems": true,
       "items": {
         "type": "object",

@@ -14,13 +14,11 @@ pub enum UpstreamFailure {
   ConnectionRefused,
   ConnectionTerminated,
   ConnectionTimeout,
-  ConnectionReadTimeout,
   ConnectionWriteTimeout,
   TlsProtocolError,
   TlsCertificateError,
   TlsAlertReceived,
   HttpResponseTimeout,
-  HttpProtocolError,
 }
 
 impl UpstreamFailure {
@@ -32,13 +30,11 @@ impl UpstreamFailure {
       Self::ConnectionRefused => "connection_refused",
       Self::ConnectionTerminated => "connection_terminated",
       Self::ConnectionTimeout => "connection_timeout",
-      Self::ConnectionReadTimeout => "connection_read_timeout",
       Self::ConnectionWriteTimeout => "connection_write_timeout",
       Self::TlsProtocolError => "tls_protocol_error",
       Self::TlsCertificateError => "tls_certificate_error",
       Self::TlsAlertReceived => "tls_alert_received",
       Self::HttpResponseTimeout => "http_response_timeout",
-      Self::HttpProtocolError => "http_protocol_error",
     }
   }
 }
@@ -184,11 +180,11 @@ mod tests {
   #[test]
   fn marker_is_transparent_and_wins_over_generic_sources() {
     let error = anyhow::anyhow!("existing diagnostic");
-    let annotated = annotate(error, UpstreamFailure::HttpProtocolError);
+    let annotated = annotate(error, UpstreamFailure::TlsProtocolError);
     assert_eq!(annotated.to_string(), "existing diagnostic");
     assert_eq!(
       classify(annotated.as_ref()),
-      Some(UpstreamFailure::HttpProtocolError)
+      Some(UpstreamFailure::TlsProtocolError)
     );
   }
 

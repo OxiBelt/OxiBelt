@@ -25,7 +25,6 @@ pub struct RuntimeWorkerApplicabilities {
   pub tokio_executor_workers: RuntimeWorkerApplicability,
   pub tcp_accept_workers: RuntimeWorkerApplicability,
   pub quic_socket_workers: RuntimeWorkerApplicability,
-  pub compio_direct_h1_workers: RuntimeWorkerApplicability,
   pub tokio_blocking_worker_limit: RuntimeWorkerApplicability,
 }
 
@@ -35,7 +34,6 @@ impl RuntimeWorkerApplicabilities {
       tokio_executor_workers: RuntimeWorkerApplicability::Applied,
       tcp_accept_workers: RuntimeWorkerApplicability::Applied,
       quic_socket_workers: RuntimeWorkerApplicability::Applied,
-      compio_direct_h1_workers: RuntimeWorkerApplicability::Applied,
       tokio_blocking_worker_limit: RuntimeWorkerApplicability::Applied,
     }
   }
@@ -45,7 +43,6 @@ impl RuntimeWorkerApplicabilities {
       tokio_executor_workers: RuntimeWorkerApplicability::Inapplicable,
       tcp_accept_workers: RuntimeWorkerApplicability::Applied,
       quic_socket_workers: RuntimeWorkerApplicability::Applied,
-      compio_direct_h1_workers: RuntimeWorkerApplicability::Inapplicable,
       tokio_blocking_worker_limit: RuntimeWorkerApplicability::Inapplicable,
     }
   }
@@ -55,7 +52,6 @@ impl RuntimeWorkerApplicabilities {
       RuntimeWorkerPool::TokioExecutor => self.tokio_executor_workers,
       RuntimeWorkerPool::TcpAccept => self.tcp_accept_workers,
       RuntimeWorkerPool::QuicSocket => self.quic_socket_workers,
-      RuntimeWorkerPool::CompioDirectH1 => self.compio_direct_h1_workers,
     }
   }
 }

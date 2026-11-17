@@ -215,6 +215,7 @@ impl<'de> Deserialize<'de> for Config {
     lb_policy_compat::ensure_supported(&diagnostics).map_err(serde::de::Error::custom)?;
     normalize_merged_upstream_resolution_compat(&mut value).map_err(serde::de::Error::custom)?;
     reject_removed_access_log_config(&value).map_err(serde::de::Error::custom)?;
+    reject_removed_runtime_config(&value).map_err(serde::de::Error::custom)?;
     let mut config: Self = RawConfig::deserialize(value)
       .map_err(serde::de::Error::custom)?
       .try_into()

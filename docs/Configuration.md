@@ -33,13 +33,13 @@ oxibelt --config source/config/oxibelt.toml --check
 
 For editor completion and automation, the build-validated JSON Schema for the
 current native configuration epoch is
-[`source/assets/oxibelt-config-v1.schema.json`](../source/assets/oxibelt-config-v1.schema.json).
+[`source/assets/oxibelt-config-v2.schema.json`](../source/assets/oxibelt-config-v2.schema.json).
 The repository [`.taplo.toml`](../.taplo.toml) associates that schema with the
 example and native TOML configuration directories. Print the exact embedded
 schema with:
 
 ```sh
-oxibeltctl config schema --epoch 1
+oxibeltctl config schema --epoch 2
 ```
 
 Run local production parsing, include expansion, structural checks, and the
@@ -69,7 +69,7 @@ Omit `--file` to explain the active redacted Admin configuration through
 `GET /admin/v1/config/explain`. Literal secrets, secret references, and values
 already redacted by the effective-config boundary are never returned.
 
-Native schema epochs are monotonic. Epoch 1 is the current public contract;
+Native schema epochs are monotonic. Epoch 2 is the current public contract;
 its artifact is immutable for incompatible shape changes. Additive optional
 fields and metadata corrections may be published within an epoch, while a
 field removal, incompatible type change, or incompatible required-field change
@@ -78,21 +78,21 @@ is versioned independently. JSON Schema provides structural/editor guidance;
 `Config::load` plus `Config::validate` remains authoritative for cross-field,
 path, security, and runtime semantics.
 
-The only automatic migration currently supported is the explicit legacy epoch
-0 to epoch 1 transform:
+Explicit migrations from epoch `0` or `1` target epoch `2`. Epoch `0` first
+applies the legacy transform; both paths then remove the retired runtime settings:
 
 ```sh
 oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
-  --from 0 --to 1 --dry-run
+  --from 1 --to 2 --dry-run
 oxibeltctl config migrate /etc/oxibelt/config/oxibelt.toml \
-  --from 0 --to 1
+  --from 1 --to 2
 ```
 
 Migration preserves comments and formatting through `toml_edit`, rejects
 ambiguous or conflicting transformations, emits a deterministic report, and
 validates an in-memory overlay with production path semantics before writing.
 The default output is a new sibling directory named
-`<config-directory>.migrated-v1`; existing output is never overwritten. Only
+`<config-directory>.migrated-v2`; existing output is never overwritten. Only
 TOML documents in the include graph are copied. Certificates, keys, and rule
 assets remain at the original roots, so the result is a review/overlay tree,
 not a self-contained runnable layout until the operator supplies the referenced
@@ -105,11 +105,9 @@ oxibelt runtime-check --config source/config/oxibelt.toml
 ```
 
 `runtime-check` separately reports configuration load and validation, tracing,
-crypto provider setup, hardening, Compio probe and main runtime construction,
-the Tokio compatibility island, TLS certificate/key loading, and listener bind
-dry-runs. Use `--format json` for automation. When Compio crashes during the
-probe, the parent process reports a normal failed stage instead of terminating
-with the probe signal.
+crypto provider setup, hardening, Tokio runtime construction, TLS certificate/key
+loading, and listener bind dry-runs. Use `--format json` for automation; its
+report schema version is `2`.
 
 Run the production preflight doctor without starting listeners:
 
@@ -649,17 +647,12 @@ linux_only = true
 read_only_rootfs_compatible = true
 memory_only_state = true
 unprivileged_mode = true
-main_runtime = "tokio_hyper" # hybrid_compio | tokio_hyper | auto; legacy: compio
-topology_policy = "allow_fallback" # allow_fallback | require_exact
-direct_h1_io = "auto" # auto | tokio_hyper | compio
 
 [runtime.workers]
 tokio = "auto"
-compio_direct_h1 = "auto"
 
 [runtime.worker_multipliers]
 tokio = 1.0
-compio_direct_h1 = 1.0
 accept = 0.5
 quic_socket = 1.0
 
@@ -700,20 +693,17 @@ read_paths = []
 read_write_paths = []
 ```
 
-`unprivileged_mode = true` rejects listener ports `1..1023` unless `[runtime.netport_switcher] enabled = true` is set for data-plane listeners and OxiBelt is started through `/usr/local/bin/oxibelt-netport-switcher`. While the Compio direct-H1 response engine remains experimental, the checked-in example and conservative production recommendation explicitly select `main_runtime = "tokio_hyper"` and `direct_h1_io = "auto"`.
+`unprivileged_mode = true` rejects listener ports `1..1023` unless `[runtime.netport_switcher] enabled = true` is set for data-plane listeners and OxiBelt is started through `/usr/local/bin/oxibelt-netport-switcher`.
 
 ### Library runtime ownership
 
 The Rust library has separate owned and embedded entry points; see
-[Embedding OxiBelt](Embedding.md). `RuntimePolicy::FromConfig` applies
-`runtime.main_runtime`, `runtime.topology_policy`, and the configured Tokio and
-Compio worker ownership in a runtime created and owned by OxiBelt.
-`RuntimePolicy::CurrentRuntime` instead uses the caller's current Tokio
-runtime. In that mode the main-runtime, topology-policy, Tokio-worker, and
-Compio-worker fields remain valid TOML but are reported as `Inapplicable`; the
-library never resizes the caller executor or claims a different executor.
-Accept and QUIC socket workers remain OxiBelt-owned and their configuration is
-still applied.
+[Embedding OxiBelt](Embedding.md). `RuntimePolicy::FromConfig` creates an
+OxiBelt-owned Tokio runtime with the configured Tokio worker allocation.
+`RuntimePolicy::CurrentRuntime` uses the caller's current Tokio runtime and
+reports executor sizing as `Inapplicable`; the library never resizes the caller
+executor. Accept and QUIC socket workers remain OxiBelt-owned and their
+configuration is still applied.
 
 `ProcessPolicy::Embedded` separately selects
 `ProcessGlobalHooks::CallerManaged`, `VerifyOnly`, or `ApplySelected`. These
@@ -724,23 +714,23 @@ after a caller-owned runtime has created threads. Select
 `ProcessPolicy::Standalone` and the owned API when configured Landlock or
 OxiBelt-owned process signals are required.
 
-`main_runtime = "hybrid_compio"` is the canonical default. It owns one Compio bootstrap driver around a Tokio compatibility island; TCP accept, general HTTP, HTTP/3 and QUIC, DNS and discovery, timers, background/control work, and Tokio-managed blocking work execute on Tokio. Only an activated Compio direct-H1 worker fleet owns direct-H1 transport work. The legacy value `main_runtime = "compio"` remains behavior-identical, resolves to `hybrid_compio`, and emits `CFG_RUNTIME_MAIN_RUNTIME_COMPATIBILITY_ALIAS`; no removal deadline is assigned. `main_runtime = "tokio_hyper"` runs the same server subsystems directly on Tokio/Hyper. `main_runtime = "auto"` prefers a safe hybrid topology and records a fallback to Tokio/Hyper when Compio is unavailable or unsafe.
+Tokio/Hyper is the sole supported runtime and direct-H1 transport. Native
+configuration epoch `2` removes `runtime.main_runtime`, `runtime.direct_h1_io`,
+`runtime.topology_policy`, `runtime.workers.compio_direct_h1`, and
+`runtime.worker_multipliers.compio_direct_h1`. Removed fields are rejected even
+when `config.strict_unknown_fields = false`; use the explicit epoch migration
+before starting or reloading an older configuration. The archived epoch-1
+schema remains exportable but does not enable the removed runtime.
 
-`topology_policy = "allow_fallback"` preserves the compatibility fallback behavior. `require_exact` rejects startup or reload when `auto` cannot retain the preferred hybrid topology or an explicitly requested Compio direct-H1 transport would require a compatibility fallback. Capability resolution is deterministic and reports `exact`, `fallback`, `rejected`, or `feature_disabled` together with a fixed reason; it accounts for the OS, architecture, compiled support, Compio driver safety and preflight, required socket/protocol capabilities, hardening, and worker/resource budgets. Raw probe errors are not exposed in logs, metrics, config explain, runtime snapshots, or support bundles.
-
-`[runtime.workers].tokio` and `compio_direct_h1` accept a positive integer or `"auto"`. Auto sizing uses Rust `std::thread::available_parallelism()`, falls back to `1` when detection fails, applies the matching `[runtime.worker_multipliers]` value, and rounds up. Multiplier defaults are `tokio = 1.0`, `compio_direct_h1 = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`. Legacy `runtime.worker_threads` and `runtime.worker_multipliers.runtime` remain accepted: each supplies a canonical owner only when that owner's new field is omitted, so an explicit owner-specific value takes precedence. Legacy use emits a fixed migration diagnostic, and a legacy-only configuration preserves its previous resolved counts. Existing configurations that set `runtime.worker_multipliers.accept = 1.0` keep the previous CPU-count accept-worker behavior.
-
-`direct_h1_io = "auto"` and `direct_h1_io = "tokio_hyper"` use the established Hyper direct-H1 transport. `direct_h1_io = "compio"` is an explicit Linux-only experimental selection and applies only after the normal direct-H1 route, upstream, body, retry, transform, upgrade, and CONNECT guards pass. It requires the hybrid Compio compatibility boundary. With `topology_policy = "allow_fallback"`, an incompatible resolved main topology records a Tokio/Hyper compatibility fallback; with `require_exact`, startup or reload rejects the candidate instead.
-
-The Compio selection starts a persistent service at subsystem startup. Its worker count is the resolved `[runtime.workers].compio_direct_h1` allocation, and each worker owns one long-lived Compio execution context plus a bounded submission queue. Queue capacity, per-origin idle connections, total idle connections, retained buffer count, idle lifetime, and absolute connection lifetime derive from existing runtime and upstream-pool limits; worker count is the only independent public Compio allocation in this release. Shutdown stops admission, waits only within the configured process drain deadline, cancels remaining operations, closes idle connections, and joins workers. OxiBelt reserves the final bounded portion of that same configured window for terminal worker cleanup (up to 5 seconds, using the whole window when it is shorter than 100 ms; there is no new public knob), so native thread joining cannot extend shutdown beyond the operator's deadline. If a native worker still owns driver I/O at that hard deadline, OxiBelt aborts the process so a supervisor can replace it instead of detaching the worker into a continuing server.
-
-When Compio direct-H1 is selected, automatic circuit-breaker connection and pending capacities are also bounded by the transport's worker memory, queue memory, file-descriptor, and active-plus-staged reload reservations. OxiBelt reduces only automatic values to find a safe transport budget; an operator-provided fixed value that cannot fit remains an unavailable Compio capability. `topology_policy = "allow_fallback"` then selects Tokio/Hyper direct-H1, while `require_exact` rejects the candidate. A finite cgroup memory limit is the hard sizing ceiling. When the cgroup reports unlimited memory, an optional Kubernetes request is capped by detected host memory when both are available, followed by host-memory discovery and a conservative fallback if no finite observation succeeds.
-
-Only guarded empty `GET` or `HEAD` requests can enter this service, including prevalidated downstream H2/H3 requests, and only when the upstream hop is direct plaintext HTTP/1.1. Bodyful, chunked, streaming, upgrade, CONNECT, retry-unsafe, transformed, or otherwise ineligible requests remain on the Hyper direct-H1 transport and record a pre-dispatch Compio fallback. An unhealthy or draining service, or a resolution or connection failure, may fall back only before an upstream request byte is written. Queue saturation and connection-capacity rejection instead return the configured admission response and never reroute through Hyper. Once dispatch is externally observable, a Compio failure closes the connection and returns the established upstream failure; it never implicitly replays the operation through Hyper.
-
-Reusable Compio connections are returned to the bounded idle pool only after complete unambiguous response framing with no residual bytes, no peer `Connection: close`, and a matching configuration generation. Parser failure, EOF, timeout, cancellation in uncertain framing, upgrade, stale generation, worker failure, pool overflow, and I/O failure retire the connection. The response engine bounds response heads, interim-response chains, chunk metadata, and trailers internally and fails closed on unsupported or ambiguous framing.
-
-Full hot reload rejects a different resolved main topology or `[runtime.workers].tokio` count with a restart-required diagnostic. A direct-H1 backend or worker-count change can activate in-process only after the replacement fleet is staged successfully; otherwise the prior configuration, service, and reported topology remain active. Accept and QUIC worker changes retain listener-rebind behavior. A `topology_policy` change is accepted in-process only when re-resolution validates the active topology and is rejected otherwise.
+`[runtime.workers].tokio` accepts a positive integer or `"auto"`. Auto sizing
+uses `std::thread::available_parallelism()`, falls back to `1` when detection
+fails, applies the matching multiplier, and rounds up. Multiplier defaults are
+`tokio = 1.0`, `accept = 0.5`, and `quic_socket = 1.0`. Legacy
+`runtime.worker_threads` and `runtime.worker_multipliers.runtime` remain
+accepted and fill only omitted canonical Tokio settings. Changing Tokio worker
+count requires a process restart; accept and QUIC changes retain their listener
+rebind behavior. Required capability failures reject activation rather than
+selecting another runtime.
 
 `[runtime.accept]` controls data-plane TCP accept loops for HTTPS, plain HTTP, and TCP stream listeners. `workers` accepts a positive integer or `"auto"`; omitted values default to `"auto"` and use `[runtime.worker_multipliers].accept`. Set `reuse_port = true` whenever the resolved worker count can be greater than one; OxiBelt fails startup instead of silently enabling `SO_REUSEPORT`. `backlog` is passed to `listen(2)`. `accept_error_backoff_ms` throttles repeated accept errors.
 
@@ -765,7 +755,7 @@ API and does not bypass Admin/IPM authorization.
 
 `[runtime.netport_switcher]` is an opt-in Linux root wrapper for privileged data-plane ports. When enabled, the wrapper creates a Unix control socket under `socket_dir`, starts the main OxiBelt process as `main_uid:main_gid`, and brokers only startup-allowed privileged binds for HTTPS TCP, HTTP/3 UDP, plain HTTP, stream TCP/UDP, and WebRTC TURN UDP/TCP/TLS. The wrapper needs `CAP_NET_BIND_SERVICE` to bind low ports and `CAP_SETUID`/`CAP_SETGID` to launch the child as `main_uid:main_gid`. The broker validates protocol, bind address, purpose, worker count, `SO_REUSEPORT`, TCP backlog, and UDP buffer options before passing a socket FD over `SCM_RIGHTS`. Admin, metrics, and health listeners are control/ops surfaces and are never brokered. `pidfd_supervision = true` uses Linux pidfds for child signal forwarding when available and falls back to PID signaling if pidfd setup fails; it forwards the drain-only `SIGUSR1` signal as well as normal shutdown/reload signals. `--check` and `--dump-effective-config` remain offline validation commands and do not require the wrapper socket.
 
-`[runtime.hardening]` contains Linux hardening hooks. `close_range = "auto"` marks file descriptors `3..` close-on-exec with `close_range(CLOSE_RANGE_CLOEXEC)` when the kernel supports it; `required` fails startup on error. `seccomp.expectation` verifies an externally installed filter: `required` requires the startup process to report Linux filter mode `2` and `NoNewPrivs: 1` before OxiBelt mutates either state, `optional` records a bounded degradation when that contract is absent, and `off` makes no enforcement claim. Optional `profile_identity` and `profile_digest` values are expectations for the reserved orchestrator environment assertion; OxiBelt compares them but always labels them `kernel_verified = false`. Legacy `seccomp.mode` maps `off` to `off`, `log` to `optional`, and `enforce` to `required` with a migration diagnostic; mixing old and new fields is invalid. The alias remains accepted for native schema epoch `1` and is reserved for removal only in a future incompatible schema epoch.
+`[runtime.hardening]` contains Linux hardening hooks. `close_range = "auto"` marks file descriptors `3..` close-on-exec with `close_range(CLOSE_RANGE_CLOEXEC)` when the kernel supports it; `required` fails startup on error. `seccomp.expectation` verifies an externally installed filter: `required` requires the startup process to report Linux filter mode `2` and `NoNewPrivs: 1` before OxiBelt mutates either state, `optional` records a bounded degradation when that contract is absent, and `off` makes no enforcement claim. Optional `profile_identity` and `profile_digest` values are expectations for the reserved orchestrator environment assertion; OxiBelt compares them but always labels them `kernel_verified = false`. Legacy `seccomp.mode` maps `off` to `off`, `log` to `optional`, and `enforce` to `required` with a migration diagnostic; mixing old and new fields is invalid. The alias remains accepted for native schema epoch `2` and is reserved for removal only in a future incompatible schema epoch.
 
 `landlock.mode = "enforce"` preserves the operator-owned manual allowlist in `read_paths` and `read_write_paths`. `landlock.mode = "manifest"` derives the minimum filesystem rules from the fully resolved configuration and unions those explicit lists as exceptional additions. OxiBelt installs the rules before telemetry exporters, async runtimes, workers, and listeners, reports requested and effective ABI rights plus policy/manifest digests, and rejects a required operation that the active ABI cannot represent. The existing embedded API rejects Landlock activation when it cannot prove single-thread process ownership instead of claiming whole-process confinement.
 
@@ -1212,11 +1202,11 @@ When downstream HTTP/3 is enabled and `quic.alt_svc.enabled = true`, HTTPS HTTP/
 
 `happy_eyeballs.mode = "v3"` is the default implementation of the current Happy Eyeballs v3 Internet-Draft scheduling model; global `legacy` and per-upstream `happy_eyeballs_mode = "legacy"` are compatibility escapes. The delay fields are bounded and every candidate launch remains pre-dispatch and deadline-bounded. `svcb` and `pref64` accept only `auto` or `disabled`; they are security/compatibility escape hatches, not a way to supply arbitrary DNS targets, ports, or trust policy. Automatic SVCB discovery is not queried or admitted for literal-IP origins or origins resolved through `/etc/hosts`; those configured endpoints remain authoritative. Per-upstream `svcb_allowed_ports` is an explicit unique nonzero allowlist. `upstream_http_version_mode = "ceiling"` requires that route to explicitly set `upstream_http_version`; `exact` is the default.
 
-During native schema epoch `1`, `[quic.upstream.resolution]` is deprecated compatibility input. Its leaves map to the canonical policy, including `address_family_stagger_ms` to `happy_eyeballs.connection_attempt_delay_ms`. Disjoint canonical and legacy leaves may be combined; the same effective leaf in both locations is rejected even when values agree, so configuration never relies on precedence. Migrate to `[proxy.upstream_resolution]`; the alias is reserved for removal only in a future incompatible epoch.
+During native schema epoch `2`, `[quic.upstream.resolution]` is deprecated compatibility input. Its leaves map to the canonical policy, including `address_family_stagger_ms` to `happy_eyeballs.connection_attempt_delay_ms`. Disjoint canonical and legacy leaves may be combined; the same effective leaf in both locations is rejected even when values agree, so configuration never relies on precedence. Migrate to `[proxy.upstream_resolution]`; the alias is reserved for removal only in a future incompatible epoch.
 
 The upstream HTTP/3 pool multiplexes ordinary request forwarding over reusable QUIC connections when `quic.upstream_pool.enabled = true`. When disabled, ordinary requests use one-shot QUIC connections. One-shot HTTP/3 and WebTransport retain their dedicated connection lifetimes, but use the same bounded resolver component. Resolution, connection coalescing, and slot waits are bounded by the effective request deadline. Candidate failover is allowed only before request dispatch; a post-dispatch failure does not implicitly replay the request.
 
-Reusable connections are keyed by logical security and routing identity: protocol mode, normalized authority and TLS server name, verification/trust policy, client identity, configuration generation, and discovery identity. The selected IP address is connection state, not pool identity. OxiBelt does not coalesce across origins merely because their addresses or certificates overlap. Changing any canonical `[proxy.upstream_resolution]` field, or its deprecated legacy alias, requires a full reload. These additive canonical fields keep native configuration schema epoch `1`; omitted fields use the defaults above. Configurations that still use the legacy alias should migrate as described above.
+Reusable connections are keyed by logical security and routing identity: protocol mode, normalized authority and TLS server name, verification/trust policy, client identity, configuration generation, and discovery identity. The selected IP address is connection state, not pool identity. OxiBelt does not coalesce across origins merely because their addresses or certificates overlap. Changing any canonical `[proxy.upstream_resolution]` field, or its deprecated legacy alias, requires a full reload. These canonical fields remain available in native configuration schema epoch `2`; omitted fields use the defaults above. Configurations that still use the legacy alias should migrate as described above.
 
 ## SNI Forwarding
 
@@ -4781,7 +4771,7 @@ Bandwidth accounting excludes headers, trailers, protocol framing, encryption ov
 
 WebSockets without stream WAF use a constant-memory wire-frame adapter. It preserves masking, reserved bits, negotiated extensions, and existing frame sizes byte for byte; forwards framing without charging it; exempts Ping, Pong, and Close; and streams data payload through limiter grants no larger than 16 KiB. The adapter rechecks the shared route policy within an active frame, so a full reload from unlimited to limited reaches already-active traffic with at most the current bounded payload chunk admitted under the prior policy. WebSocket stream-WAF routes retain their separately documented frame and message inspection bounds and use base framing without extension negotiation.
 
-The bandwidth table is available only in native route TOML; it does not add a Gateway API, controller CRD, Helm policy, or `[[stream_listeners]]` field. Adding it is compatible with native configuration schema epoch `1` and takes effect on a full reload. Older binaries do not recognize the table, so remove `[routes.bandwidth]` before rolling back.
+The bandwidth table is available only in native route TOML; it does not add a Gateway API, controller CRD, Helm policy, or `[[stream_listeners]]` field. It is available in native configuration schema epoch `2` and takes effect on a full reload. Older binaries do not recognize the table, so remove `[routes.bandwidth]` before rolling back.
 
 Route buffering overrides are optional. Omitted values inherit from `[proxy.buffering]`; `temp_dir` is always global. CONNECT tunnels, HTTP Upgrade, and WebTransport forwarding remain streaming even when buffering is enabled.
 

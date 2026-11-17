@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::cli::{Command, ConfigMigrateArgs, ConfigSubcommand, OutputFormat};
-use crate::config_migrate_transform::{MigrationChange, transform_document};
+use crate::config_migrate_transform::{MigrationChange, transform_document, transform_epoch1_to2};
 use crate::config_output::{
   NATIVE_SCHEMA_EPOCH, REPORT_SCHEMA_VERSION, error_report, print_serializable, report_ok,
 };
@@ -76,12 +76,7 @@ pub(crate) fn run_if_requested(
 }
 
 fn migrate(args: &ConfigMigrateArgs) -> anyhow::Result<MigrationReport> {
-  if args.from_epoch != 0 || args.to_epoch != NATIVE_SCHEMA_EPOCH {
-    bail!(
-      "only the explicit native configuration migration 0 -> {} is supported",
-      NATIVE_SCHEMA_EPOCH
-    );
-  }
+  validate_migration_epochs(args.from_epoch, args.to_epoch)?;
 
   let source_file = args
     .file
@@ -97,6 +92,7 @@ fn migrate(args: &ConfigMigrateArgs) -> anyhow::Result<MigrationReport> {
   }
 
   let document = load_native_config_document(&source_file)?;
+  crate::config_migrate_transform::validate_epoch1_runtime_workers(&document.value)?;
   let mut source_files = document.files;
   source_files.sort();
   source_files.dedup();
@@ -121,7 +117,13 @@ fn migrate(args: &ConfigMigrateArgs) -> anyhow::Result<MigrationReport> {
     let raw = fs::read_to_string(&source)
       .with_context(|| format!("failed to read {}", source.display()))?;
     let display = relative.to_string_lossy().replace('\\', "/");
-    let (rendered, mut file_changes) = transform_document(&raw, &display)?;
+    let (epoch1, mut file_changes) = if args.from_epoch == 0 {
+      transform_document(&raw, &display)?
+    } else {
+      (raw, Vec::new())
+    };
+    let (rendered, mut epoch2_changes) = transform_epoch1_to2(&epoch1, &display)?;
+    file_changes.append(&mut epoch2_changes);
     changes.append(&mut file_changes);
     documents.push(MigratedDocument {
       source,
@@ -220,6 +222,14 @@ fn migrate(args: &ConfigMigrateArgs) -> anyhow::Result<MigrationReport> {
   })
 }
 
+fn validate_migration_epochs(from_epoch: u32, to_epoch: u32) -> anyhow::Result<()> {
+  if matches!((from_epoch, to_epoch), (0, 2) | (1, 2)) {
+    Ok(())
+  } else {
+    bail!("only the explicit native configuration migrations 0 -> 2 and 1 -> 2 are supported")
+  }
+}
+
 fn resolve_output_dir(
   source_root: &Path,
   requested: Option<&Path>,
@@ -305,6 +315,41 @@ mod tests {
   use crate::cli::{Cli, ConfigCommand};
 
   #[test]
+  fn migration_rejects_auto_worker_overflow_across_includes_before_writing() {
+    let temp = tempfile::tempdir().expect("migration fixture");
+    let input = temp.path().join("input");
+    fs::create_dir(&input).expect("input directory");
+    let source = input.join("oxibelt.toml");
+    let raw =
+      "include = ['workers.toml']\n[runtime.workers]\ntokio = 1\ncompio_direct_h1 = 'auto'\n";
+    fs::write(&source, raw).expect("root document");
+    fs::write(
+      input.join("workers.toml"),
+      "[runtime.worker_multipliers]\ncompio_direct_h1 = 1e300\n",
+    )
+    .expect("included multiplier");
+    let output = temp.path().join("output");
+    let args = ConfigMigrateArgs {
+      file: source.clone(),
+      from_epoch: 1,
+      to_epoch: 2,
+      output_dir: Some(output.clone()),
+      dry_run: false,
+    };
+    let error = match migrate(&args) {
+      Err(error) => error,
+      Ok(_) => panic!("legacy worker overflow is invalid"),
+    };
+    assert!(
+      error
+        .to_string()
+        .contains("automatic worker resolution overflows")
+    );
+    assert!(!output.exists());
+    assert_eq!(fs::read_to_string(&source).expect("unchanged source"), raw);
+  }
+
+  #[test]
   fn migrate_requires_explicit_source_and_target_epochs() {
     let cli = Cli::try_parse_from([
       "oxibeltctl",
@@ -314,7 +359,7 @@ mod tests {
       "--from",
       "0",
       "--to",
-      "1",
+      "2",
       "--dry-run",
     ])
     .expect("migration command should parse");
@@ -325,8 +370,31 @@ mod tests {
       panic!("expected migration command");
     };
     assert_eq!(args.from_epoch, 0);
-    assert_eq!(args.to_epoch, 1);
+    assert_eq!(args.to_epoch, 2);
     assert!(args.dry_run);
+  }
+
+  #[test]
+  fn accepts_epoch_named_flag_aliases() {
+    let cli = Cli::try_parse_from([
+      "oxibeltctl",
+      "config",
+      "migrate",
+      "config.toml",
+      "--from-epoch",
+      "1",
+      "--to-epoch",
+      "2",
+      "--dry-run",
+    ])
+    .expect("epoch-named migration aliases should parse");
+    let Command::Config(ConfigCommand {
+      command: ConfigSubcommand::Migrate(args),
+    }) = cli.command
+    else {
+      panic!("expected migration command");
+    };
+    assert_eq!((args.from_epoch, args.to_epoch), (1, 2));
   }
 
   #[test]
@@ -334,7 +402,20 @@ mod tests {
     let temp = tempfile::tempdir().expect("temporary directory");
     let source = temp.path().join("config");
     fs::create_dir(&source).expect("source directory");
-    let output = resolve_output_dir(&source, None, 1).expect("output path");
-    assert_eq!(output, temp.path().join("config.migrated-v1"));
+    let output = resolve_output_dir(&source, None, 2).expect("output path");
+    assert_eq!(output, temp.path().join("config.migrated-v2"));
+  }
+
+  #[test]
+  fn only_composed_legacy_to_two_and_one_to_two_are_supported() {
+    for pair in [(0, 2), (1, 2)] {
+      validate_migration_epochs(pair.0, pair.1).expect("supported migration");
+    }
+    for pair in [(0, 1), (1, 1), (2, 2), (2, 1), (3, 2)] {
+      assert!(
+        validate_migration_epochs(pair.0, pair.1).is_err(),
+        "{pair:?}"
+      );
+    }
   }
 }

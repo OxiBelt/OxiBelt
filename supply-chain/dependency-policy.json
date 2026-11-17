@@ -17,9 +17,9 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "466ae03d5745f5fb7c9ad513744990f118e8cf35f5827618f011f4c1fb702dde",
-      "exemptionInventorySha256": "a3a741dff48a1c36313ad0e71dab0ddb6d5a8263b287571467a2e92742454f59",
-      "exemptedPackageVersions": 451
+      "lockfileSha256": "13ea4683ef886068df5c432b392afee660a11c13166d04ba9e332310a39c4ef1",
+      "exemptionInventorySha256": "50ddfe0960dc124bf2514b1585e1fafa5001d1d30729245d71fc3aee99a49884",
+      "exemptedPackageVersions": 432
     },
     "reviewTriggers": [
       "new direct dependency",
@@ -163,10 +163,6 @@
       "shlex": [
         "1",
         "2"
-      ],
-      "spin": [
-        "0.10",
-        "0.9"
       ],
       "spki": [
         "0.7",
@@ -586,7 +582,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:466ae03d5745f5fb7c9ad513744990f118e8cf35f5827618f011f4c1fb702dde",
+      "subject": "Cargo.lock@sha256:13ea4683ef886068df5c432b392afee660a11c13166d04ba9e332310a39c4ef1",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test. The maintainer approved exactly bindgen 0.72/0.73 and prettyplease 0.2/0.3 coexistence through 2026-11-03 under issue #304 for retained OpenSSL and refreshed AWS-LC build-tool requirements; other compatibility lines remain frozen. The maintainer also approved replacing exactly bit-set 0.8/0.9 with 0.8/0.11 and bit-vec 0.8/0.9 with 0.8/0.10 through 2026-11-03 under issue #304 for refreshed LALRPOP; the obsolete itertools 0.14 line is retired.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -599,7 +595,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:466ae03d5745f5fb7c9ad513744990f118e8cf35f5827618f011f4c1fb702dde",
+      "subject": "Cargo.lock@sha256:13ea4683ef886068df5c432b392afee660a11c13166d04ba9e332310a39c4ef1",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "@piquark6046",
       "bootstrap": true,
