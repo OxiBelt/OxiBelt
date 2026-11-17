@@ -3183,7 +3183,6 @@ dependencies = [
  "openssl-probe",
  "oxibelt-admin-mutation-core",
  "oxibelt-admission-policy",
- "oxibelt-allocator",
  "oxibelt-build-identity",
  "oxibelt-control-protocol",
  "oxibelt-crypto-primitives",
@@ -3257,13 +3256,6 @@ dependencies = [
  "anyhow",
  "serde",
  "toml",
-]
-
-[[package]]
-name = "oxibelt-allocator"
-version = "0.0.0"
-dependencies = [
- "cc",
 ]
 
 [[package]]

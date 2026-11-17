@@ -364,19 +364,17 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                 WORKSPACE_PACKAGES,
             )
 
-    def test_compatibility_data_plane_policies_allow_the_allocator(self) -> None:
+    def test_compatibility_data_plane_policies_use_system_allocator_graph(self) -> None:
         expected_features = {
             "compatibility data plane (default features)": frozenset(
                 {
                     "admin-runtime",
-                    "allocator-mimalloc-experiment",
                     "default",
                 }
             ),
             "compatibility data plane (all features)": frozenset(
                 {
                     "admin-runtime",
-                    "allocator-mimalloc-experiment",
                     "config-tooling",
                     "crypto-ring",
                     "default",
@@ -385,44 +383,36 @@ class CargoPackageBoundaryTests(unittest.TestCase):
                 }
             ),
         }
-        allocator = (
-            "oxibelt-allocator v0.0.0 "
-            "(file:///workspace/source/crates/oxibelt-allocator)|native-mimalloc\n"
-        )
-
         for label, features in expected_features.items():
             with self.subTest(policy=label):
                 policy = CHECKER.POLICY_BY_LABEL[label]
                 self.assertEqual(
                     policy.allowed_workspace_packages,
-                    CHECKER.ADMIN_RUNTIME_WORKSPACE_PACKAGES | {"oxibelt-allocator"},
+                    CHECKER.ADMIN_RUNTIME_WORKSPACE_PACKAGES,
                 )
                 self.assertEqual(dict(policy.expected_features)["oxibelt"], features)
-                graph = (
-                    "oxibelt v0.0.0 (file:///workspace/source)|"
-                    f"{','.join(sorted(features))}\n{allocator}"
-                )
+                graph = "oxibelt v0.0.0 (file:///workspace/source)|" + ",".join(
+                    sorted(features)
+                ) + "\n"
                 summary = CHECKER.validate_profile_graph(
                     policy,
                     graph,
                     WORKSPACE_PACKAGES,
                 )
-                self.assertEqual(summary.workspace_packages, 2)
+                self.assertEqual(summary.workspace_packages, 1)
 
-    def test_strict_data_plane_rejects_the_allocator_workspace_package(self) -> None:
+    def test_data_plane_profiles_reject_the_removed_allocator_package(self) -> None:
         graph = (
-            "oxibelt-dataplane-strict v0.0.0 "
-            "(file:///workspace/source/apps/oxibelt-dataplane-strict)|\n"
-            "oxibelt v0.0.0 (file:///workspace/source)|\n"
+            "oxibelt v0.0.0 (file:///workspace/source)|admin-runtime,default\n"
             "oxibelt-allocator v0.0.0 "
             "(file:///workspace/source/crates/oxibelt-allocator)|native-mimalloc\n"
         )
         with self.assertRaisesRegex(
             CHECKER.BoundaryError,
-            "unexpected workspace packages: oxibelt-allocator",
+            "unknown local/path packages: oxibelt-allocator",
         ):
             CHECKER.validate_profile_graph(
-                CHECKER.POLICY_BY_LABEL["strict data plane"],
+                CHECKER.POLICY_BY_LABEL["compatibility data plane (default features)"],
                 graph,
                 WORKSPACE_PACKAGES,
             )

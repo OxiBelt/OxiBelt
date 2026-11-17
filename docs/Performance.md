@@ -4,54 +4,13 @@ OxiBelt includes a local Docker-based performance harness for repeatable proxy s
 
 ## Running Locally
 
-### Optional allocator evaluation
+### Allocator behavior
 
-The `allocator-mimalloc-experiment` Cargo feature is part of the package's
-default feature set. For the integrated `oxibelt` executable, this selects
-secure mimalloc on `x86_64` Linux GNU and musl targets. The private Rust
-`GlobalAlloc` bridge compiles OxiBelt's byte-locked Microsoft mimalloc source
-from `source/third_party/`; the workspace has no `mimalloc` or
-`libmimalloc-sys` Cargo dependency. Supported ARM64 and
-RISC-V builds explicitly select Rust's `std::alloc::System`, including builds
-with this feature or `--all-features` enabled. The strict data-plane executable
-keeps `std::alloc::System`; the library does not install a global allocator,
-and embedding hosts retain allocator ownership. The standard compatibility
-`oxibelt` and `dataplane` Docker targets inherit the package defaults.
-
-Build both variants from the same source revision and retain their binaries
-separately for comparison. The package defaults select mimalloc on supported
-`x86_64` Linux targets:
-
-```sh
-cargo build --locked --release -p oxibelt --bin oxibelt
-```
-
-To build the `System`-allocator baseline, disable default features while
-retaining the Admin runtime:
-
-```sh
-cargo build --locked --release -p oxibelt --bin oxibelt --no-default-features --features admin-runtime
-```
-
-The allocator contract checker can be run with:
-
-```sh
-cargo run --locked --release -p oxibelt --bin oxibelt-allocator-check --features allocator-mimalloc-experiment
-```
-
-The checker is test support for alignment, initialized contents, growth and
-cross-thread ownership; its duration is not a performance result. Full-feature
-CI checks the x86_64 mimalloc variant and verifies the positive `System`
-fallback in ARM64 builds; RISC-V GNU and musl cross-checks also cover explicit
-allocator selection and all-feature fallback. Qualification must identify the exact source
-revision, owned binding hash, native source manifest, selected feature graph,
-native secure mode and target flags, binary hash and image digest. Source
-revision alone does not distinguish allocator variants. Compare throughput and
-tail latency together with CPU use, retained memory and correctness before
-selecting an allocator for a deployment. Allocator selection is a build-time
-choice, not a TOML option or runtime failover. See
-[Embedding](Embedding.md#process-global-hooks) for process ownership and
-startup reporting.
+OxiBelt executables use Rust's `std::alloc::System` allocator on every
+supported target. The library does not install a global allocator; embedding
+hosts retain allocator ownership. There is no allocator variant to select or
+compare in current builds. See [Embedding](Embedding.md#process-global-hooks)
+for process ownership and startup reporting.
 
 ### Docker harness
 

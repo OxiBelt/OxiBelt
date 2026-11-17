@@ -17,7 +17,7 @@
         "mozilla": "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
       },
       "bootstrapException": "rust-cargo-vet-bootstrap",
-      "lockfileSha256": "cba541fcd5a507218fad6bcf775ab4c739bbf346bbae62fa9c09cd4620b552b7",
+      "lockfileSha256": "466ae03d5745f5fb7c9ad513744990f118e8cf35f5827618f011f4c1fb702dde",
       "exemptionInventorySha256": "a3a741dff48a1c36313ad0e71dab0ddb6d5a8263b287571467a2e92742454f59",
       "exemptedPackageVersions": 451
     },
@@ -319,72 +319,8 @@
         "removalCriteria": "Replace this patch when upstream web-transport-quinn supports draft 16 CONNECT negotiation, session flow control, stream resets, and draft 02 compatibility. Review every update and rerun WebTransport and dependency admission suites."
       }
     ],
-    "nativeSources": [
-      {
-        "id": "mimalloc",
-        "version": "3.5.2",
-        "path": "source/third_party/mimalloc-3.5.2",
-        "upstreamRepository": "https://github.com/microsoft/mimalloc",
-        "upstreamVersion": "3.5.2",
-        "upstreamRevision": "636510a36ab743f76a582067142f29d15b024c90",
-        "sourceScope": "70 upstream source files plus 4 OxiBelt metadata files (74 total); exact unsigned tag and no patches; scoped native security review completed; performance qualification deferred",
-        "acquisition": {
-          "method": "git archive from the exact upstream annotated tag",
-          "tag": "v3.5.2",
-          "tagObject": "4e3a61669be12515da74a0208d4f58bd920931ab",
-          "tagSignature": "absent",
-          "dependency": false
-        },
-        "patches": [],
-        "provenanceReviewedOn": "2026-09-13",
-        "independentNativeSafetyReview": "scoped-2026-09-13",
-        "performanceQualification": "deferred",
-        "upstreamManifestSha256": "c66333ca3228ba54326e8400d01faecb4e8655c1e109ab455edcf553445dd111",
-        "nativeManifestSha256": "c66333ca3228ba54326e8400d01faecb4e8655c1e109ab455edcf553445dd111",
-        "sourceProvenanceSha256": "1309be6775a372ef1d99bb42ef69b2bdfeb96524de73223fcd90422818d89a4d",
-        "readmeSha256": "76dc3c3402df8315a97a10e23b70cc0daaf261dc94330a830d6f18cc2bd3bc0b",
-        "buildIntegration": {
-          "path": "source/crates/oxibelt-allocator/build.rs",
-          "sha256": "01a6df92d836846401548183f74f4e4d5c592ee38e7a9787e5a897e7e6311511"
-        },
-        "rustBinding": {
-          "package": "oxibelt-allocator",
-          "path": "source/crates/oxibelt-allocator/src/lib.rs",
-          "sha256": "dc97f0aaf7a3aa982949af09fdc7c7f0516e4833b9f806984ee0499cb0ab1df3",
-          "derivedFrom": "https://github.com/purpleprotocol/mimalloc_rust",
-          "license": "MIT",
-          "visibility": "safe allocator type; private raw FFI"
-        },
-        "license": "MIT",
-        "licenseFiles": {
-          "LICENSE": "82ade5d7d9b029044b5fbbc326207fc47c2d44ee4dd71e8a559c36d728217de9"
-        },
-        "targets": [
-          "x86_64-unknown-linux-gnu",
-          "x86_64-unknown-linux-musl"
-        ],
-        "secureLevel": 4,
-        "debugLevel": 0,
-        "padding": true,
-        "statsLevel": 1,
-        "profileLevel": 1,
-        "allocatorOverride": false,
-        "maintenanceReviewIntervalDays": 90,
-        "upstreamUpdateCriteria": "At every Microsoft mimalloc release and at least once per review interval, review the selected native source, preserve the private binding and secure build contract, remove superseded backports, and rerun dependency admission plus allocator qualification before updating.",
-        "unmaintainableAction": "If a required native update cannot satisfy source, license, ownership, unsafe-code, or allocator qualification review, remove the optional allocator feature before that update.",
-        "owner": "@piquark6046",
-        "trackingIssue": "https://github.com/OxiBelt/OxiBelt/issues/183"
-      }
-    ],
+    "nativeSources": [],
     "criticalDependencies": [
-      {
-        "category": "memory-allocation",
-        "packages": {},
-        "nativeSources": [
-          "mimalloc"
-        ],
-        "reviewBoundary": "Native allocation contracts, build provenance, secure-mode selection, FFI ownership, cross-thread free and allocator lifecycle"
-      },
       {
         "category": "cryptography",
         "packages": {
@@ -650,7 +586,7 @@
       "id": "rust-duplicate-compatibility-bootstrap",
       "ecosystem": "rust",
       "control": "duplicate-compatibility-lines",
-      "subject": "Cargo.lock@sha256:cba541fcd5a507218fad6bcf775ab4c739bbf346bbae62fa9c09cd4620b552b7",
+      "subject": "Cargo.lock@sha256:466ae03d5745f5fb7c9ad513744990f118e8cf35f5827618f011f4c1fb702dde",
       "rationale": "The exact current set of simultaneous semver compatibility lines is frozen while upstream dependency convergence work removes it. Reviewed proptest and compression updates removed obsolete RNG, Brotli and allocator compatibility lines; any further line fails the static admission test. The maintainer approved exactly bindgen 0.72/0.73 and prettyplease 0.2/0.3 coexistence through 2026-11-03 under issue #304 for retained OpenSSL and refreshed AWS-LC build-tool requirements; other compatibility lines remain frozen. The maintainer also approved replacing exactly bit-set 0.8/0.9 with 0.8/0.11 and bit-vec 0.8/0.9 with 0.8/0.10 through 2026-11-03 under issue #304 for refreshed LALRPOP; the obsolete itertools 0.14 line is retired.",
       "owner": "@piquark6046",
       "bootstrap": true,
@@ -663,7 +599,7 @@
       "id": "rust-cargo-vet-bootstrap",
       "ecosystem": "rust",
       "control": "cargo-vet",
-      "subject": "Cargo.lock@sha256:cba541fcd5a507218fad6bcf775ab4c739bbf346bbae62fa9c09cd4620b552b7",
+      "subject": "Cargo.lock@sha256:466ae03d5745f5fb7c9ad513744990f118e8cf35f5827618f011f4c1fb702dde",
       "rationale": "Initial cargo-vet adoption records the exact current exemption inventory while imported and local audits replace it. During an explicitly approved dependency refresh, obsolete exact-version exemptions may be replaced by the selected exact versions; wildcard exemptions, criteria broadening, and unrelated expansion remain forbidden, and every inventory hash or count change triggers static review.",
       "owner": "@piquark6046",
       "bootstrap": true,

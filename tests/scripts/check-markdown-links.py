@@ -16,24 +16,6 @@ from urllib.parse import unquote, urlsplit
 
 
 OPENAPI_PATH = PurePosixPath("source/assets/admin-openapi.json")
-# These upstream docs link to files omitted from the selected native payload.
-# Keep repo-authored README.OXIBELT.md and future Markdown under normal checks.
-UPSTREAM_MARKDOWN_EXEMPTIONS = frozenset(
-    {
-        PurePosixPath("source/third_party/mimalloc-3.5.2/SECURITY.md"),
-        PurePosixPath(
-            "source/third_party/mimalloc-3.5.2/contrib/docker/readme.md"
-        ),
-        PurePosixPath(
-            "source/third_party/mimalloc-3.5.2/contrib/vcpkg/readme.md"
-        ),
-        PurePosixPath("source/third_party/mimalloc-3.5.2/readme.md"),
-        PurePosixPath("source/third_party/mimalloc-3.5.2/src/prim/readme.md"),
-        PurePosixPath(
-            "source/third_party/mimalloc-3.5.2/src/prim/windows/readme.md"
-        ),
-    }
-)
 HTTP_METHODS = {"delete", "get", "head", "options", "patch", "post", "put"}
 FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 INLINE_CODE_RE = re.compile(r"(`+)(.+?)\1")
@@ -92,7 +74,7 @@ def _markdown_files_to_scan(tracked: set[PurePosixPath]) -> tuple[PurePosixPath,
         sorted(
             path
             for path in tracked
-            if path.suffix.lower() == ".md" and path not in UPSTREAM_MARKDOWN_EXEMPTIONS
+            if path.suffix.lower() == ".md"
         )
     )
 

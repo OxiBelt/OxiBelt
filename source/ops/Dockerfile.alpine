@@ -98,7 +98,6 @@ COPY source/apps/oxibelt-netport-switcher ./source/apps/oxibelt-netport-switcher
 COPY source/apps/oxibeltctl ./source/apps/oxibeltctl
 COPY source/crates/oxibelt-admission-policy ./source/crates/oxibelt-admission-policy
 COPY source/crates/oxibelt-admin-mutation-core ./source/crates/oxibelt-admin-mutation-core
-COPY source/crates/oxibelt-allocator ./source/crates/oxibelt-allocator
 COPY source/crates/oxibelt-build-identity ./source/crates/oxibelt-build-identity
 COPY source/crates/oxibelt-control-http ./source/crates/oxibelt-control-http
 COPY source/crates/oxibelt-control-protocol ./source/crates/oxibelt-control-protocol
@@ -194,8 +193,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     . /tmp/oxibelt-build-env && \
     test "${OXIBELT_BUILD_RUST_TARGET}" = "riscv64gc-unknown-linux-musl" && \
     cargo check --all-targets --all-features --locked --target "${OXIBELT_BUILD_RUST_TARGET}" && \
-    cargo check -p oxibelt --lib --no-default-features --features admin-runtime,allocator-mimalloc-experiment --locked --target "${OXIBELT_BUILD_RUST_TARGET}" && \
-    cargo check -p oxibelt-allocator --all-features --locked --target "${OXIBELT_BUILD_RUST_TARGET}"
+    cargo check -p oxibelt --lib --locked --target "${OXIBELT_BUILD_RUST_TARGET}"
 
 FROM builder AS controller-builder
 

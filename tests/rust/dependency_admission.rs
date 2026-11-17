@@ -685,7 +685,6 @@ fn rust_policy_classifies_and_pins_critical_dependency_lines() {
       "cryptography",
       "database",
       "kubernetes",
-      "memory-allocation",
       "parsing-serialization",
       "tls-quic-http",
     ])
@@ -1317,677 +1316,87 @@ fn webtransport_h3_transport_sources_are_byte_locked_and_governed() {
 }
 
 #[test]
-fn allocator_binding_defaults_to_secure_mimalloc_only_on_supported_targets() {
+fn allocator_integration_is_removed_from_current_build_and_admission() {
+  let root = toml_document("Cargo.toml");
   let runtime = toml_document("source/Cargo.toml");
-  let features = runtime["features"].as_table().expect("runtime features");
-  assert_eq!(
-    string_array(
-      &features["allocator-mimalloc-experiment"],
-      "allocator feature"
-    ),
-    vec!["dep:oxibelt-allocator"]
-  );
-  for (name, value) in features {
-    if name != "allocator-mimalloc-experiment" && name != "default" {
-      assert!(
-        string_array(value, "runtime feature").iter().all(|entry| {
-          *entry != "allocator-mimalloc-experiment"
-            && *entry != "dep:oxibelt-allocator"
-            && *entry != "oxibelt-allocator/native-mimalloc"
-        }),
-        "unreviewed feature can change allocator selection: {name}"
-      );
-    }
-  }
-  assert_eq!(
-    string_array(&features["default"], "runtime default features"),
-    vec!["admin-runtime", "allocator-mimalloc-experiment"],
-    "default integrated builds must select the architecture-gated allocator"
-  );
-
-  let allocator = toml_document("source/crates/oxibelt-allocator/Cargo.toml");
+  let runtime_features = runtime["features"].as_table().expect("runtime features");
   assert!(
-    string_array(
-      &allocator["features"]["default"],
-      "allocator default features"
-    )
-    .is_empty()
+    !runtime_features.contains_key("allocator-mimalloc-experiment"),
+    "the removed allocator feature must not return"
   );
   assert_eq!(
-    string_array(
-      &allocator["features"]["native-mimalloc"],
-      "allocator native feature"
-    ),
-    vec!["dep:cc"]
+    string_array(&runtime_features["default"], "runtime default features"),
+    vec!["admin-runtime"]
   );
-  let cc = &allocator["build-dependencies"]["cc"];
-  assert_eq!(cc["version"].as_str(), Some("=1.9.0"));
-  assert_eq!(cc["optional"].as_bool(), Some(true));
   assert!(
     runtime["dependencies"].get("oxibelt-allocator").is_none(),
-    "the native allocator must not be an unconditional dependency"
+    "the runtime must not depend on the removed allocator crate"
   );
-  let allocator_target = "cfg(all(target_os = \"linux\", target_arch = \"x86_64\", target_pointer_width = \"64\", any(target_env = \"gnu\", target_env = \"musl\")))";
-  let targets = runtime["target"]
-    .as_table()
-    .expect("runtime target dependencies");
-  let allocator_targets = targets
-    .iter()
-    .filter(|(_, target)| {
-      target
-        .get("dependencies")
-        .and_then(|deps| deps.get("oxibelt-allocator"))
-        .is_some()
-    })
-    .map(|(name, _)| name.as_str())
-    .collect::<Vec<_>>();
-  assert_eq!(allocator_targets, vec![allocator_target]);
-  let source_allocator = &targets[allocator_target]["dependencies"]["oxibelt-allocator"];
-  assert_eq!(source_allocator["workspace"].as_bool(), Some(true));
-  assert_eq!(source_allocator["optional"].as_bool(), Some(true));
-  assert_eq!(
-    string_array(&source_allocator["features"], "native target feature"),
-    vec!["native-mimalloc"]
+  assert!(
+    root["workspace"]["dependencies"]
+      .get("oxibelt-allocator")
+      .is_none(),
+    "the workspace must not declare the removed allocator crate"
+  );
+  assert!(
+    !string_array(&root["workspace"]["members"], "workspace members")
+      .contains(&"source/crates/oxibelt-allocator"),
+    "the allocator crate must not remain a workspace member"
   );
 
-  for manifest in ["Cargo.toml", "source/Cargo.toml"] {
-    let text = read(manifest);
+  let root_path = repo_root();
+  for removed_path in [
+    "source/crates/oxibelt-allocator",
+    "source/third_party/mimalloc-3.5.2",
+    "tests/rust/allocator-experiment-check.rs",
+    "tests/scripts/run-allocator-sanitizers.sh",
+  ] {
     assert!(
-      !text.contains("libmimalloc-sys") && !text.contains("mimalloc ="),
-      "{manifest} must not restore the removed mimalloc Rust packages"
+      !root_path.join(removed_path).exists(),
+      "removed allocator path still exists: {removed_path}"
     );
   }
-  let root = toml_document("Cargo.toml");
-  let workspace_allocator = &root["workspace"]["dependencies"]["oxibelt-allocator"];
-  assert_eq!(
-    workspace_allocator["path"].as_str(),
-    Some("source/crates/oxibelt-allocator")
-  );
-  assert_eq!(
-    workspace_allocator["default-features"].as_bool(),
-    Some(false)
-  );
-  assert_eq!(
-    workspace_allocator
-      .as_table()
-      .expect("workspace allocator dependency")
-      .len(),
-    2,
-    "workspace allocator dependency gained an unreviewed setting"
-  );
-  // Hyper is independently governed below. The removed allocator must not
-  // become a Cargo patch or workspace exclusion again.
-  assert_hyper_vendor_admission();
-  assert!(
-    string_array(&root["workspace"]["members"], "workspace members")
-      .contains(&"source/crates/oxibelt-allocator")
-  );
-  assert!(
-    !string_array(
-      &root["workspace"]["default-members"],
-      "workspace default members"
-    )
-    .contains(&"source/crates/oxibelt-allocator"),
-    "the optional allocator crate must stay outside the default build set"
-  );
 
   let lock = toml_document("Cargo.lock");
   let packages = lock["package"].as_array().expect("lock packages");
   assert!(
     packages.iter().all(|package| !matches!(
       package["name"].as_str(),
-      Some("mimalloc" | "libmimalloc-sys")
+      Some("oxibelt-allocator" | "mimalloc" | "libmimalloc-sys")
     )),
-    "Cargo.lock must not contain the removed allocator packages"
-  );
-  let owned = packages
-    .iter()
-    .filter(|package| package["name"].as_str() == Some("oxibelt-allocator"))
-    .collect::<Vec<_>>();
-  assert_eq!(owned.len(), 1, "owned allocator crate inventory changed");
-  assert!(
-    owned[0].get("source").is_none() && owned[0].get("checksum").is_none(),
-    "owned allocator crate must resolve from the workspace"
-  );
-
-  let binding = read("source/crates/oxibelt-allocator/src/lib.rs");
-  for symbol in [
-    "mi_malloc_aligned",
-    "mi_zalloc_aligned",
-    "mi_realloc_aligned",
-    "mi_free",
-  ] {
-    assert_eq!(
-      binding.matches(&format!("fn {symbol}(")).count(),
-      1,
-      "private binding must declare {symbol} exactly once"
-    );
-  }
-  assert!(
-    !binding.contains("pub fn mi_") && !binding.contains("pub unsafe fn"),
-    "the allocator bridge must not expose a raw native API"
-  );
-  assert!(
-    binding.contains("pub struct Mimalloc")
-      && binding.contains("unsafe impl GlobalAlloc for Mimalloc"),
-    "the owned crate must expose only its safe GlobalAlloc adapter"
-  );
-  assert!(
-    read("source/src/main.rs").contains("oxibelt_allocator::Mimalloc")
-      && !read("source/src/lib.rs").contains("oxibelt_allocator::Mimalloc"),
-    "only the integrated binary may install the allocator bridge"
-  );
-  assert!(
-    read("tests/rust/allocator-experiment-check.rs").contains("oxibelt_allocator::Mimalloc"),
-    "the allocator checker must exercise the same owned binding"
-  );
-
-  let build = read("source/crates/oxibelt-allocator/build.rs");
-  for required in [
-    "CARGO_CFG_TARGET_OS",
-    "CARGO_CFG_TARGET_ARCH",
-    "CARGO_CFG_TARGET_POINTER_WIDTH",
-    "CARGO_CFG_TARGET_ENV",
-    "target_os == \"linux\"",
-    "target_arch == \"x86_64\"",
-    "target_pointer_width == \"64\"",
-    "matches!(target_env.as_str(), \"gnu\" | \"musl\")",
-    "third_party/mimalloc-3.5.2",
-    "src/static.c",
-    "build.define(\"MI_SECURE\", \"4\")",
-    "build.define(\"MI_DEBUG\", \"0\")",
-    "build.define(\"MI_PADDING\", \"1\")",
-    "build.define(\"MI_STATS\", \"1\")",
-    "build.define(\"MI_PROFILE\", \"1\")",
-    "build.flag(\"-ftls-model=initial-exec\")",
-    "format!(\"{build_kind}_CFLAGS\")",
-    "format!(\"{build_kind}_CC\")",
-    "CC_SHELL_ESCAPED_FLAGS",
-    "changes_preprocessor_input",
-    "\"--CONFIG\"",
-    "\"-IQUOTE\"",
-    "\"-SPECS\"",
-    "normalized.contains(\"TLS-MODEL\")",
-    "OXIBELT_MIMALLOC_CONFIGURATION_GUARDS",
-    "#if !defined(MI_SECURE) || MI_SECURE != 4",
-    "#if !defined(MI_DEBUG) || MI_DEBUG != 0",
-    "#if !defined(MI_PADDING) || MI_PADDING != 1",
-    "#if !defined(MI_STATS) || MI_STATS != 1",
-    "#if !defined(MI_PROFILE) || MI_PROFILE != 1",
-    ".canonicalize()",
-    "build.file(write_guarded_translation_unit(&native_root))",
-    "build.compile(\"oxibelt_mimalloc\")",
-    "audit_native_archive()",
-    "Command::new(\"nm\")",
-    "REQUIRED_PRIVATE_ALLOCATOR_SYMBOLS",
-    "FORBIDDEN_PROCESS_ALLOCATOR_SYMBOLS",
-    "normalized.contains(\"MI_\")",
-  ] {
-    assert!(build.contains(required), "build script lost {required}");
-  }
-  let translation_unit_include = build
-    .find("include.as_str()")
-    .expect("the guarded translation unit must insert the canonical reviewed native source");
-  let configuration_guards = build
-    .match_indices("OXIBELT_MIMALLOC_CONFIGURATION_GUARDS")
-    .map(|(index, _)| index)
-    .collect::<Vec<_>>();
-  assert_eq!(
-    configuration_guards.len(),
-    3,
-    "the guarded translation unit must inject its configuration checks before and after the native source"
-  );
-  assert!(
-    configuration_guards[1] < translation_unit_include
-      && translation_unit_include < configuration_guards[2],
-    "the canonical native source must remain enclosed by configuration guards"
-  );
-  assert!(
-    !build.contains("build.define(\"MI_MALLOC_OVERRIDE\"")
-      && !build.contains("build.define(\"MI_OVERRIDE\""),
-    "the native build must not override the process C allocator"
-  );
-}
-
-#[cfg(all(
-  target_os = "linux",
-  target_arch = "x86_64",
-  any(target_env = "gnu", target_env = "musl")
-))]
-#[test]
-fn allocator_native_build_uses_canonical_translation_unit() {
-  let temporary = tempfile::tempdir().expect("temporary allocator build root");
-  let shadow_source = temporary.path().join("shadow/src");
-  fs::create_dir_all(&shadow_source).expect("create shadow source directory");
-  fs::write(
-    shadow_source.join("static.c"),
-    "#error shadow translation unit must not replace the reviewed native source\n",
-  )
-  .expect("write shadow translation unit");
-
-  let output = std::process::Command::new(env!("CARGO"))
-    .current_dir(repo_root())
-    .env("CARGO_TARGET_DIR", temporary.path().join("target"))
-    .env(
-      "CC",
-      format!("cc -I{}", temporary.path().join("shadow").display()),
-    )
-    .args([
-      "check",
-      "--locked",
-      "--offline",
-      "-p",
-      "oxibelt-allocator",
-      "--features",
-      "native-mimalloc",
-    ])
-    .output()
-    .expect("run adversarial allocator build");
-  let diagnostics = format!(
-    "{}\n{}",
-    String::from_utf8_lossy(&output.stdout),
-    String::from_utf8_lossy(&output.stderr)
-  );
-  assert!(
-    output.status.success(),
-    "shadow translation unit displaced the canonical source or the audited build failed: {diagnostics}"
-  );
-}
-
-#[cfg(all(
-  target_os = "linux",
-  target_arch = "x86_64",
-  any(target_env = "gnu", target_env = "musl")
-))]
-#[test]
-fn allocator_native_build_rejects_unreviewed_header_search() {
-  let temporary = tempfile::tempdir().expect("temporary allocator build root");
-  let shadow_include = temporary.path().join("shadow");
-  fs::create_dir_all(&shadow_include).expect("create shadow include directory");
-  fs::write(
-    shadow_include.join("mimalloc.h"),
-    "#error unreviewed header must not replace the reviewed native header\n",
-  )
-  .expect("write shadow header");
-
-  let output = std::process::Command::new(env!("CARGO"))
-    .current_dir(repo_root())
-    .env("CARGO_TARGET_DIR", temporary.path().join("target"))
-    .env("CC", format!("cc -iquote{}", shadow_include.display()))
-    .args([
-      "check",
-      "--locked",
-      "--offline",
-      "-p",
-      "oxibelt-allocator",
-      "--features",
-      "native-mimalloc",
-    ])
-    .output()
-    .expect("run adversarial allocator build");
-  let diagnostics = format!(
-    "{}\n{}",
-    String::from_utf8_lossy(&output.stdout),
-    String::from_utf8_lossy(&output.stderr)
-  );
-  assert!(
-    !output.status.success(),
-    "unreviewed header search path unexpectedly built successfully"
-  );
-  assert!(
-    diagnostics.contains("CC must not override or inject mimalloc configuration"),
-    "adversarial build failed without the header-search rejection: {diagnostics}"
-  );
-  assert!(
-    !diagnostics.contains("unreviewed header must not replace"),
-    "the compiler consumed the unreviewed sentinel header before rejecting the build"
-  );
-}
-
-#[cfg(all(
-  target_os = "linux",
-  target_arch = "x86_64",
-  any(target_env = "gnu", target_env = "musl")
-))]
-#[test]
-fn allocator_native_build_rejects_padding_configuration_override() {
-  let temporary = tempfile::tempdir().expect("temporary allocator build root");
-  let output = std::process::Command::new(env!("CARGO"))
-    .current_dir(repo_root())
-    .env("CARGO_TARGET_DIR", temporary.path().join("target"))
-    .env("CFLAGS", "-DMI_PADDING=0")
-    .args([
-      "check",
-      "--locked",
-      "--offline",
-      "-p",
-      "oxibelt-allocator",
-      "--features",
-      "native-mimalloc",
-    ])
-    .output()
-    .expect("run adversarial allocator build");
-  let diagnostics = format!(
-    "{}\n{}",
-    String::from_utf8_lossy(&output.stdout),
-    String::from_utf8_lossy(&output.stderr)
-  );
-  assert!(
-    !output.status.success(),
-    "padding configuration override unexpectedly built successfully"
-  );
-  assert!(
-    diagnostics.contains("CFLAGS must not override or inject mimalloc configuration"),
-    "adversarial build failed without the configuration rejection: {diagnostics}"
-  );
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-#[test]
-fn allocator_sanitizer_runner_rejects_glibc_compiler_for_musl_evidence() {
-  let temporary = tempfile::tempdir().expect("temporary allocator sanitizer evidence root");
-  let output = std::process::Command::new("bash")
-    .current_dir(repo_root())
-    .arg(repo_root().join("tests/scripts/run-allocator-sanitizers.sh"))
-    .args([
-      "--target",
-      "musl",
-      "--sanitizer",
-      "address-undefined",
-      "--evidence-dir",
-    ])
-    .arg(temporary.path())
-    .env("OXIBELT_ALLOCATOR_SANITIZER_CC", "cc")
-    .output()
-    .expect("run allocator sanitizer target mismatch regression");
-  let diagnostics = format!(
-    "{}\n{}",
-    String::from_utf8_lossy(&output.stdout),
-    String::from_utf8_lossy(&output.stderr)
-  );
-  assert!(
-    !output.status.success(),
-    "glibc compiler unexpectedly produced accepted musl evidence"
-  );
-  assert!(
-    diagnostics.contains("expected the matching x86-64 musl loader"),
-    "sanitizer runner failed without the libc mismatch rejection: {diagnostics}"
-  );
-  assert!(
-    temporary
-      .path()
-      .join("compiler-target-elf-header.txt")
-      .is_file()
-      && temporary
-        .path()
-        .join("compiler-target-program-headers.txt")
-        .is_file(),
-    "target mismatch evidence must retain the inspected ELF identity"
-  );
-  assert!(
-    !temporary.path().join("rustup-targets.txt").exists(),
-    "compiler target mismatch must fail before inspecting the Rust target"
-  );
-}
-
-#[test]
-fn allocator_native_source_is_byte_locked_and_governed() {
-  const NATIVE_PATH: &str = "source/third_party/mimalloc-3.5.2";
-  const UPSTREAM_MANIFEST: &str = "source/third_party/mimalloc-3.5.2/UPSTREAM-MANIFEST.sha256";
-  const NATIVE_MANIFEST: &str = "source/third_party/mimalloc-3.5.2/NATIVE-MANIFEST.sha256";
-  const PROVENANCE: &str = "source/third_party/mimalloc-3.5.2/SOURCE-PROVENANCE.json";
-  const README: &str = "source/third_party/mimalloc-3.5.2/README.OXIBELT.md";
-  const BINDING: &str = "source/crates/oxibelt-allocator/src/lib.rs";
-
-  assert_eq!(
-    read(".gitattributes"),
-    "source/third_party/mimalloc-3.5.2/** -whitespace\n",
-    "vendored upstream whitespace policy changed"
+    "Cargo.lock must not contain removed allocator packages"
   );
 
   let policy = json_policy();
-  let native_sources = policy["rust"]["nativeSources"]
-    .as_array()
-    .expect("nativeSources must be an array");
-  assert_eq!(native_sources.len(), 1, "native source inventory changed");
-  let native = &native_sources[0];
-  assert_eq!(native["id"], "mimalloc");
-  assert_eq!(native["version"], "3.5.2");
-  assert_eq!(native["path"], NATIVE_PATH);
-  assert_eq!(
-    native["upstreamRepository"],
-    "https://github.com/microsoft/mimalloc"
-  );
-  assert_eq!(native["upstreamVersion"], "3.5.2");
-  assert_eq!(
-    native["upstreamRevision"],
-    "636510a36ab743f76a582067142f29d15b024c90"
-  );
-  assert_eq!(
-    native["acquisition"]["method"],
-    "git archive from the exact upstream annotated tag"
-  );
-  assert_eq!(native["acquisition"]["tag"], "v3.5.2");
-  assert_eq!(
-    native["acquisition"]["tagObject"],
-    "4e3a61669be12515da74a0208d4f58bd920931ab"
-  );
-  assert_eq!(native["acquisition"]["tagSignature"], "absent");
-  assert_eq!(native["acquisition"]["dependency"], false);
-  assert_eq!(
-    native["sourceScope"],
-    "70 upstream source files plus 4 OxiBelt metadata files (74 total); exact unsigned tag and no patches; scoped native security review completed; performance qualification deferred"
-  );
-  assert_eq!(native["patches"], serde_json::json!([]));
-  assert_eq!(native["provenanceReviewedOn"], "2026-09-13");
-  assert_eq!(native["independentNativeSafetyReview"], "scoped-2026-09-13");
-  assert_eq!(native["performanceQualification"], "deferred");
-  assert!(native.get("reviewedOn").is_none());
-  assert_eq!(native["license"], "MIT");
-  assert_eq!(native["secureLevel"], 4);
-  assert_eq!(native["debugLevel"], 0);
-  assert_eq!(native["padding"], true);
-  assert_eq!(native["statsLevel"], 1);
-  assert_eq!(native["profileLevel"], 1);
-  assert_eq!(native["allocatorOverride"], false);
-  assert_eq!(
-    native["targets"],
-    serde_json::json!(["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"])
-  );
-  assert_eq!(native["maintenanceReviewIntervalDays"], 90);
-  assert_eq!(native["owner"], "@piquark6046");
-  assert_eq!(
-    native["trackingIssue"],
-    "https://github.com/OxiBelt/OxiBelt/issues/183"
-  );
-
-  let critical = policy["rust"]["criticalDependencies"]
-    .as_array()
-    .expect("criticalDependencies must be an array")
-    .iter()
-    .find(|entry| entry["category"] == "memory-allocation")
-    .expect("memory-allocation critical category");
-  assert_eq!(
-    critical["packages"],
-    serde_json::json!({}),
-    "native allocator must not be represented as a Cargo package"
-  );
-  assert_eq!(critical["nativeSources"], serde_json::json!(["mimalloc"]));
-
-  let vendor_root = repo_root().join(NATIVE_PATH);
-  let files = hash_regular_tree(&vendor_root);
-  assert_eq!(files.len(), 74, "governed native source file set changed");
-  assert_eq!(
-    sha256_hex(&fs::read(repo_root().join(UPSTREAM_MANIFEST)).unwrap()),
-    native["upstreamManifestSha256"]
-  );
-  assert_eq!(
-    sha256_hex(&fs::read(repo_root().join(NATIVE_MANIFEST)).unwrap()),
-    native["nativeManifestSha256"]
-  );
-  assert_eq!(
-    sha256_hex(&fs::read(repo_root().join(PROVENANCE)).unwrap()),
-    native["sourceProvenanceSha256"]
-  );
-  assert_eq!(
-    sha256_hex(&fs::read(repo_root().join(README)).unwrap()),
-    native["readmeSha256"]
-  );
-  assert_eq!(
-    sha256_hex(&fs::read(repo_root().join(BINDING)).unwrap()),
-    native["rustBinding"]["sha256"]
-  );
-
-  let upstream = checksum_manifest(UPSTREAM_MANIFEST);
-  let selected = checksum_manifest(NATIVE_MANIFEST);
-  assert_eq!(upstream.len(), 70, "upstream native manifest changed");
-  assert_eq!(selected.len(), 70, "selected native manifest changed");
-  assert_eq!(
-    upstream.keys().collect::<Vec<_>>(),
-    selected.keys().collect::<Vec<_>>(),
-    "selected native source must retain the reviewed upstream file set"
-  );
-
-  let mut source_files = files.clone();
-  for excluded in [
-    "NATIVE-MANIFEST.sha256",
-    "README.OXIBELT.md",
-    "SOURCE-PROVENANCE.json",
-    "UPSTREAM-MANIFEST.sha256",
-  ] {
-    assert!(
-      source_files.remove(excluded).is_some(),
-      "missing governed metadata file {excluded}"
-    );
-  }
-  assert_eq!(
-    source_files, selected,
-    "native source differs from its selected content manifest"
-  );
-
-  let changed = upstream
-    .iter()
-    .filter(|(path, checksum)| selected.get(*path) != Some(*checksum))
-    .map(|(path, _)| path.as_str())
-    .collect::<BTreeSet<_>>();
+  let rust = &policy["rust"];
   assert!(
-    changed.is_empty(),
-    "native source must match the upstream tag exactly"
-  );
-
-  let provenance: serde_json::Value =
-    serde_json::from_str(&read(PROVENANCE)).expect("source provenance must be valid JSON");
-  assert_eq!(provenance["schemaVersion"], 1);
-  assert_eq!(provenance["component"]["path"], NATIVE_PATH);
-  assert_eq!(provenance["component"]["version"], native["version"]);
-  assert_eq!(
-    provenance["upstream"]["repository"],
-    native["upstreamRepository"]
-  );
-  assert_eq!(provenance["upstream"]["tag"], native["acquisition"]["tag"]);
-  assert_eq!(
-    provenance["upstream"]["tagObject"],
-    native["acquisition"]["tagObject"]
-  );
-  assert_eq!(
-    provenance["upstream"]["tagSignature"],
-    native["acquisition"]["tagSignature"]
-  );
-  assert_eq!(
-    provenance["upstream"]["revision"],
-    native["upstreamRevision"]
-  );
-  assert_eq!(
-    provenance["acquisition"]["method"],
-    native["acquisition"]["method"]
-  );
-  assert_eq!(provenance["acquisition"]["dependency"], false);
-  assert_eq!(provenance["selectedBuild"]["secureLevel"], 4);
-  assert_eq!(provenance["selectedBuild"]["debugLevel"], 0);
-  assert_eq!(provenance["selectedBuild"]["padding"], true);
-  assert_eq!(provenance["selectedBuild"]["statsLevel"], 1);
-  assert_eq!(provenance["selectedBuild"]["profileLevel"], 1);
-  assert_eq!(provenance["selectedBuild"]["allocatorOverride"], false);
-  assert_eq!(native["patches"], serde_json::json!([]));
-  assert!(
-    provenance["patches"]
+    rust["nativeSources"]
       .as_array()
-      .expect("source provenance patches must be an array")
+      .expect("native source inventory")
       .is_empty(),
-    "unreviewed native patches must not be introduced"
+    "allocator native source admission must be removed"
   );
-  assert_eq!(
-    provenance["manifests"]["upstream"]["sha256"],
-    native["upstreamManifestSha256"]
-  );
-  assert_eq!(
-    provenance["manifests"]["native"]["sha256"],
-    native["nativeManifestSha256"]
-  );
-  assert_eq!(
-    provenance["rustBinding"]["path"],
-    native["rustBinding"]["path"]
-  );
-  for (path, checksum) in native["licenseFiles"]
-    .as_object()
-    .expect("native license files must be an object")
-  {
-    assert_eq!(
-      files.get(path).map(String::as_str),
-      checksum.as_str(),
-      "native license digest is stale for {path}"
-    );
-  }
-
-  assert_eq!(native["rustBinding"]["path"], BINDING);
-  assert_eq!(
-    native["rustBinding"]["derivedFrom"],
-    "https://github.com/purpleprotocol/mimalloc_rust"
-  );
-  assert_eq!(native["rustBinding"]["license"], "MIT");
-  assert_eq!(
-    native["rustBinding"]["visibility"],
-    "safe allocator type; private raw FFI"
-  );
-  assert_eq!(
-    native["buildIntegration"]["path"],
-    "source/crates/oxibelt-allocator/build.rs"
-  );
-  assert_eq!(
-    sha256_hex(&fs::read(repo_root().join("source/crates/oxibelt-allocator/build.rs")).unwrap()),
-    native["buildIntegration"]["sha256"]
-  );
-  assert_eq!(
-    provenance["buildIntegration"]["path"],
-    native["buildIntegration"]["path"]
-  );
-  assert_eq!(
-    provenance["buildIntegration"]["sha256"],
-    native["buildIntegration"]["sha256"]
-  );
-  assert_eq!(provenance["rustBinding"]["rawVisibility"], "private");
-  assert_eq!(
-    provenance["rustBinding"]["adapterVisibility"],
-    "public-safe-type"
-  );
-  let binding = read(BINDING);
   assert!(
-    binding.contains("Copyright 2019 Octavian Oncescu")
-      && binding.contains("Permission is hereby granted, free of charge"),
-    "the adapted Rust binding must retain its complete MIT notice"
+    rust["criticalDependencies"]
+      .as_array()
+      .expect("critical dependency inventory")
+      .iter()
+      .all(|entry| entry["category"] != "memory-allocation"),
+    "the removed allocator must not remain a critical dependency"
   );
-  let notices = read("THIRD-PARTY-NOTICES.md");
   assert!(
-    notices.contains("Microsoft mimalloc")
-      && notices.contains("purpleprotocol/mimalloc_rust")
-      && notices.contains("Copyright 2019 Octavian Oncescu"),
-    "repository notices must preserve native and Rust-binding attribution"
+    !read("source/src/lib.rs").contains("mark_binary_allocator_mimalloc_experiment")
+      && !read("source/src/process_globals.rs")
+        .contains("mark_binary_allocator_mimalloc_experiment"),
+    "the allocator selection marker must be removed from the library API"
   );
-
-  let vet = read("supply-chain/config.toml");
-  let audits = read("supply-chain/audits.toml");
   assert!(
-    !vet.contains("[policy.libmimalloc-sys]") && !audits.contains("[[audits.mimalloc]]"),
-    "removed Cargo packages must not retain Cargo-vet policy or audits"
+    !read("source/apps/oxibelt-dataplane-strict/build.rs")
+      .contains("allocator-mimalloc-experiment"),
+    "strict builds must not register the removed Cargo feature"
+  );
+  assert!(
+    !read("tests/rust/unsafe_code_policy.rs").contains("source/crates/oxibelt-allocator"),
+    "the removed allocator bridge must not remain in the unsafe-code allowlist"
   );
 }

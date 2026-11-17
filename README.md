@@ -246,22 +246,11 @@ Rust image builds use a ten-retry budget for transient Cargo download failures,
 matching the CI policy. Persistent download failures and compiler errors still
 stop the build.
 
-The standard compatibility `oxibelt` and `dataplane` image targets inherit the
-package's default Cargo features. On `x86_64` Linux GNU and musl builds, the
-integrated `oxibelt` executable uses secure mimalloc by default. Supported
-ARM64 and RISC-V builds use `std::alloc::System`, even when
-`allocator-mimalloc-experiment` or `--all-features` is selected. The strict
-data-plane executable keeps `std::alloc::System`, and library embedding leaves
-allocator ownership with the host. To build the integrated executable without
-the allocator feature, use:
-
-```sh
-cargo build --locked --release -p oxibelt --bin oxibelt --no-default-features --features admin-runtime
-```
-
-See [Performance](docs/Performance.md#optional-allocator-evaluation) for
-allocator comparison requirements and [Embedding](docs/Embedding.md) for
-process ownership.
+The standard compatibility `oxibelt` and `dataplane` image targets use Rust's
+`std::alloc::System` allocator on every supported target. OxiBelt's library
+does not install a global allocator, so embedding hosts retain allocator
+ownership. See [Performance](docs/Performance.md#allocator-behavior) and
+[Embedding](docs/Embedding.md) for current process ownership guidance.
 
 The build regenerates and validates `ui/person-proof` for both data-plane
 artifacts. The compatibility `oxibelt` binary additionally validates and embeds

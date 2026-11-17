@@ -511,39 +511,19 @@ alongside the directly selected Brotli 9; the dependency policy records both
 compatibility lines. Other upstream constraints may likewise retain older
 transitive versions without changing the supported upgrade contract.
 
-The vendored mimalloc 3.5.2 source has scoped native review and bounded
-functional/sanitizer evidence. These do not constitute full independent native
-safety review or performance and memory qualification; those remain pending
-under [the allocator admission tracker](https://github.com/OxiBelt/OxiBelt/issues/183).
-Do not treat this maintenance work as deployment qualification. The allocator
-selection and rollback procedure below remain applicable.
+The optional allocator integration described in older upgrade history has been
+removed. Current OxiBelt executables use Rust's `std::alloc::System` allocator
+on every supported target. The library does not install a global allocator,
+and embedding hosts retain allocator ownership. No allocator Cargo feature or
+runtime selection remains.
 
 ## Optional allocator builds
 
-The `allocator-mimalloc-experiment` Cargo feature is part of the default feature
-set. It selects secure mimalloc through OxiBelt's repository-owned binding for
-the integrated `oxibelt` executable on `x86_64` Linux GNU and musl targets.
-Supported ARM64 and RISC-V builds use Rust's `std::alloc::System`, even when the
-feature or `--all-features` is requested. The standard compatibility
-`oxibelt` and `dataplane` Docker targets inherit package defaults; the strict
-data-plane executable keeps `std::alloc::System`, and library embedding leaves
-allocator ownership with the host. This adds no configuration field, schema
-migration or persistent state format.
-
-To build the integrated executable with the system allocator on x86_64, disable
-default features while retaining the Admin runtime:
-
-```sh
-cargo build --locked --release -p oxibelt --bin oxibelt --no-default-features --features admin-runtime
-```
-
-Qualify the exact binary and image, including memory retention, before
-deployment; performance evidence for one allocator does not qualify the other.
-To change allocator selection, rebuild the same source and restart with that
-verified binary or image. Existing configuration and persistent state need no
-allocator-specific conversion. See
-[Performance](Performance.md#optional-allocator-evaluation) for build commands
-and evidence requirements.
+This guidance is removed. Build the executable with the ordinary package
+defaults; all current executables use `std::alloc::System`. The change affects
+binary composition only and requires no configuration, schema, or persistent
+state migration. The historical version-specific allocator notes below remain
+as records of the builds they describe and do not define current support.
 
 ## Host/SNI Real-IP policies
 

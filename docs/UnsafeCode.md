@@ -4,11 +4,6 @@ OxiBelt denies first-party Rust unsafe code by default. The policy covers the
 main package and all of its targets, the fuzz crate, the focused unsafe-code
 harness, and the standalone Rust probe workspaces under `tests/docker/`.
 
-The allocator implementation keeps its Rust bridge in the first-party
-unsafe-code boundary. Its native mimalloc payload contains no Rust source and
-is separately byte-locked: dependency admission rejects a changed native file
-inventory, symlinks, extra files, stale provenance, or an unreviewed hash.
-
 The root workspace policy is:
 
 ```toml
@@ -50,7 +45,6 @@ Unsafe code is permitted only in these capability-isolated Linux modules:
 | --- | --- | --- |
 | `source/src/hardening/syscalls.rs` | Landlock and `close_range` syscalls not completely exposed by the locked safe dependencies | Typed access masks plus `BorrowedFd` and `OwnedFd` |
 | `source/src/tcp_hop/syscalls.rs` | `IP_MINTTL`, `IPV6_MINHOPCOUNT`, and `TCP_INFO` socket options | Typed protocol selection and `BorrowedFd` |
-| `source/crates/oxibelt-allocator/src/lib.rs` | `GlobalAlloc` bridge to the governed native allocator; the available registry wrapper would reintroduce the removed Rust/sys dependency chain | Public stateless allocator type around Rust `Layout` contracts; raw FFI remains private |
 
 Each module has one reasoned file-level `allow(unsafe_code)`. Function-level,
 nested, conditional, or additional unsafe-code allowances are prohibited. An
@@ -81,12 +75,6 @@ test, Miri, sanitizer, and fuzz results. A new allowlist entry is accepted only
 when existing locked safe libraries cannot represent the required operation;
 using an available safe wrapper is the default.
 
-For `allocator-mimalloc-experiment`, the registry wrapper cannot select
-OxiBelt's byte-locked native tree without restoring the removed `mimalloc` and
-`libmimalloc-sys` dependency boundary. The repository-owned bridge contains
-only the four C functions required by `GlobalAlloc`, stays private to the
-integrated binary and checker, and does not expose the native API to callers.
-
 ## Validation
 
 Run the ordinary static and policy checks from the repository root:
@@ -115,11 +103,6 @@ instrumentation and must not be cited as dynamic undefined-behavior, memory
 error, or data-race evidence. Pull requests that change an allowlisted module
 or the allowlist must provide the Miri and sanitizer evidence required above
 separately.
-
-Miri cannot execute the allocator's native C implementation. For this boundary,
-Miri covers only pure Rust layout and selection logic; native GNU and musl
-AddressSanitizer and UndefinedBehaviorSanitizer runs provide separate FFI and C
-evidence. Report those scopes independently.
 
 Tests may treat `ENOSYS` or `EOPNOTSUPP` as an explicitly reported unsupported
 kernel capability. Generic permission failures and unexpected errno values are

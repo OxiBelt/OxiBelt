@@ -23,23 +23,6 @@ use runtime_diagnostics::{
   handle_runtime_probe_command, run_compio_main_child, run_compio_probe_child,
 };
 
-#[cfg(all(
-  feature = "allocator-mimalloc-experiment",
-  target_os = "linux",
-  target_arch = "x86_64",
-  target_pointer_width = "64",
-  any(target_env = "gnu", target_env = "musl")
-))]
-#[global_allocator]
-static GLOBAL_ALLOCATOR: oxibelt_allocator::Mimalloc = oxibelt_allocator::Mimalloc;
-
-#[cfg(not(all(
-  feature = "allocator-mimalloc-experiment",
-  target_os = "linux",
-  target_arch = "x86_64",
-  target_pointer_width = "64",
-  any(target_env = "gnu", target_env = "musl")
-)))]
 #[global_allocator]
 static GLOBAL_ALLOCATOR: std::alloc::System = std::alloc::System;
 
@@ -156,15 +139,6 @@ struct OxiRuleFalsePositiveArgs {
 }
 
 fn main() -> anyhow::Result<()> {
-  #[cfg(all(
-    feature = "allocator-mimalloc-experiment",
-    target_os = "linux",
-    target_arch = "x86_64",
-    target_pointer_width = "64",
-    any(target_env = "gnu", target_env = "musl")
-  ))]
-  oxibelt::mark_binary_allocator_mimalloc_experiment();
-
   let args = std::env::args_os().collect::<Vec<_>>();
   if let Some(wait_seconds) = parse_lifecycle_prestop_args(&args)? {
     return run_lifecycle_prestop(wait_seconds);
